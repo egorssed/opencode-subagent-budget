@@ -1,7 +1,7 @@
 import type { Hooks, Plugin, PluginInput, PluginOptions } from "@opencode-ai/plugin";
-import fs from "node:fs/promises";
-import { resolveConfig } from "./config.js";
-import { estimatePatchSize } from "./core/estimator.js";
+import { resolveConfig } from "./config.ts";
+import { estimateArgsTokens } from "./core/estimator.ts";
+import { SessionStateManager } from "./core/state.ts";
 
 export const server: Plugin = async (
   _input: PluginInput,
@@ -10,68 +10,57 @@ export const server: Plugin = async (
   const config = resolveConfig(rawOptions);
   if (!config.enabled) return {};
 
+  const stateManager = new SessionStateManager(config);
   const sessionAgent = new Map<string, string>();
 
-  const budgetFor = (agent: string | undefined): number => {
-    const budgetKB =
-      agent === "orchestrator" ? config.orchestratorBudgetKB : config.defaultBudgetKB;
-    return budgetKB * 1024;
-  };
-
-  const agentLabel = (agent: string | undefined): string =>
-    agent === "orchestrator"
-      ? "the orchestrator's"
-      : agent === "planner"
-        ? "the planner's"
-        : "the";
-
   return {
-    "chat.params": async (input, _output) => {
+    "chat.params": async (input) => {
       sessionAgent.set(input.sessionID, input.agent);
+      stateManager.getOrCreateSession(input.sessionID, input.agent);
     },
 
     "tool.execute.before": async (input, output) => {
-      if (input.tool !== "read") return;
-
       const agent = sessionAgent.get(input.sessionID);
-      if (!agent) return;
+      if (!agent || stateManager.isAgentExempt(agent)) return;
 
-      try {
-        const filePath = output.args?.filePath;
-        if (!filePath || typeof filePath !== "string") return;
+      const session = stateManager.getOrCreateSession(input.sessionID, agent);
+      stateManager.recordToolAttempt(input.sessionID, input.callID);
+      if (session.stage !== "finalization") return;
 
-        const stat =
-          typeof Bun !== "undefined" && Bun?.file
-            ? await Bun.file(filePath).stat()
-            : await fs.stat(filePath);
-        const fileSize = stat.size;
+      stateManager.assertOperationPermitted(
+        input.sessionID,
+        input.tool,
+        (output.args ?? {}) as Record<string, unknown>,
+      );
+    },
 
-        const budget = budgetFor(agent);
+    "tool.execute.after": async (input, output) => {
+      const agent = sessionAgent.get(input.sessionID);
+      if (!agent || stateManager.isAgentExempt(agent)) return;
 
-        const readLimit = output.args?.limit;
-        if (typeof readLimit === "number" && readLimit > 0) {
-          const estimatedPatchSize = await estimatePatchSize(filePath, fileSize, readLimit);
+      stateManager.getOrCreateSession(input.sessionID, agent);
+      const hookOutput = output as { output?: string; args?: unknown };
+      stateManager.recordToolSuccess(
+        input.sessionID,
+        estimateArgsTokens(input.args ?? hookOutput.args ?? {}),
+        hookOutput.output ?? "",
+        input.callID,
+      );
+    },
 
-          if (estimatedPatchSize <= budget) return;
+    "experimental.chat.system.transform": async (input, output) => {
+      const sessionID = input.sessionID;
+      if (!sessionID) return;
+      const agent = sessionAgent.get(sessionID);
+      if (!agent || stateManager.isAgentExempt(agent)) return;
 
-          throw new Error(
-            `Partial read of "${filePath}" is estimated at ~${Math.round(estimatedPatchSize / 1024)} KB ` +
-              `(${readLimit} lines). ` +
-              `This exceeds ${agentLabel(agent)} read budget of ${Math.round(budget / 1024)} KB. ` +
-              `Use a smaller limit value to read a smaller slice.`,
-          );
-        }
+      stateManager.getOrCreateSession(sessionID, agent);
+      const budget = stateManager.getRemainingBudget(sessionID);
+      if (!budget) return;
 
-        if (fileSize <= budget) return;
-
-        throw new Error(
-          `File "${filePath}" is ~${Math.round(fileSize / 1024)} KB. ` +
-            `This exceeds ${agentLabel(agent)} read budget of ${Math.round(budget / 1024)} KB. ` +
-            `Use offset/limit to read slices, or delegate large file inspection to @file-explorer.`,
-        );
-      } catch (e) {
-        if (e instanceof Error && e.message.includes("read budget")) throw e;
-      }
+      output.system.push(
+        `[capacity-guard] tools: ${budget.toolCount}/${budget.maxTools} (${budget.remainingTools} remaining); tokens: ${budget.tokensIngested}/${budget.maxTokens} (~${budget.remainingTokens} remaining); stage: ${budget.stage}`,
+      );
     },
   };
 };

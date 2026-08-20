@@ -14,3 +14,11 @@ docs_opencode
 .opencode/opencode.jsonc
 .opencode/package.json
 /.opencode/commands/
+
+.env
+.env.*
+*.log
+npm-debug.log*
+coverage/
+.turbo/
+*.tgz

@@ -1,7 +1,7 @@
 {
   "name": "opencode-context-guard",
-  "version": "1.0.0",
-  "description": "OpenCode plugin that guards agent read operations, enforcing per-agent file read budgets to prevent context overflow.",
+  "version": "1.1.0",
+  "description": "OpenCode plugin that guards sub-agent capacity, enforcing per-session tool-call and context-token budgets to prevent runaway execution and context overflow.",
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
@@ -13,13 +13,17 @@
     "README.md"
   ],
   "scripts": {
+    "test": "node --experimental-strip-types --test test/guard.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [
     "opencode",
     "opencode-plugin",
     "context-guard",
-    "read-budget"
+    "capacity-guard",
+    "subagent",
+    "token-budget",
+    "tool-limit"
   ],
   "license": "MIT",
   "peerDependencies": {
