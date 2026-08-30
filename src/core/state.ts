@@ -202,7 +202,7 @@ function handoverAdviceFor(session: SessionGuardState, profile: ResolvedAgentCap
   if (!profileAdvisesHandover(profile)) return "";
   const expected = handoverTargetPath(session);
   if (expected === undefined) return "";
-  return ` If you have write access and the task remains unfinished, you may preserve the critical context so another agent can complete it efficiently. For that write handover to ${expected}`;
+  return ` If you have the write tool and the task remains unfinished, you may preserve the critical context so another agent can complete it efficiently. To do that, write the handover to ${expected}`;
 }
 
 /**

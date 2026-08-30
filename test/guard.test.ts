@@ -49,7 +49,7 @@ function makeConfig(options: ContextGuardOptions): ResolvedContextGuardConfig {
 
 /** Advice suffix write-capable profiles' finalization rejections/statuses gain while the hatch is available. */
 const ADVICE_PREFIX =
-  " If you have write access and the task remains unfinished, you may preserve the critical context so another agent can complete it efficiently. For that write handover to ";
+  " If you have the write tool and the task remains unfinished, you may preserve the critical context so another agent can complete it efficiently. To do that, write the handover to ";
 
 async function callHook(
   hook: unknown,
@@ -1329,7 +1329,7 @@ describe("bounded finalization (finalizationRemaining)", () => {
     assert.equal(system.length, 1);
     assert.equal(
       system[0],
-      "[capacity-guard] tools: 13/15 (2 remaining); tokens: 0/18000 (~18000 remaining); stage: finalization; finalization: 0/2 used ⚠️ FORCEFUL WRAP-UP: You have exactly 2 finalization call(s) remaining. Stop exploring and start producing your deliverable immediately. If you have write access and the task remains unfinished, you may preserve the critical context so another agent can complete it efficiently. For that write handover to Handovers/SCRATCH_planner_sP.md",
+      "[capacity-guard] tools: 13/15 (2 remaining); tokens: 0/18000 (~18000 remaining); stage: finalization; finalization: 0/2 used ⚠️ FORCEFUL WRAP-UP: You have exactly 2 finalization call(s) remaining. Stop exploring and start producing your deliverable immediately. If you have the write tool and the task remains unfinished, you may preserve the critical context so another agent can complete it efficiently. To do that, write the handover to Handovers/SCRATCH_planner_sP.md",
     );
 
     // Non-allowed tool blocked with remaining-count message before the cap.
@@ -1353,7 +1353,7 @@ describe("bounded finalization (finalizationRemaining)", () => {
     );
     assert.equal(
       lastCall[0],
-      "[capacity-guard] tools: 14/15 (1 remaining); tokens: 0/18000 (~18000 remaining); stage: finalization; finalization: 1/2 used 🚨 LAST CALL: This is your FINAL tool call. You must produce your deliverable NOW. If you have write access and the task remains unfinished, you may preserve the critical context so another agent can complete it efficiently. For that write handover to Handovers/SCRATCH_planner_sP.md",
+      "[capacity-guard] tools: 14/15 (1 remaining); tokens: 0/18000 (~18000 remaining); stage: finalization; finalization: 1/2 used 🚨 LAST CALL: This is your FINAL tool call. You must produce your deliverable NOW. If you have the write tool and the task remains unfinished, you may preserve the critical context so another agent can complete it efficiently. To do that, write the handover to Handovers/SCRATCH_planner_sP.md",
     );
 
     // Second and final allowed call consumes the last slot.
@@ -1418,7 +1418,7 @@ describe("bounded finalization (finalizationRemaining)", () => {
       ),
     );
     // Read-only profile: no handover advice is advertised at all.
-    assert.ok(!(caught as CapacityLimitError).message.includes("If you have write access"));
+    assert.ok(!(caught as CapacityLimitError).message.includes("If you have the write tool"));
     // Unconfigured agents keep the legacy status line; read-only profiles get
     // no handover advice.
     const hooks = await server({} as unknown as PluginInput, makeConfig({
@@ -1645,7 +1645,7 @@ describe("handover escape hatch (one-time scratch handover)", () => {
     const message = (caught as CapacityLimitError).message;
     assert.ok(message.includes("Finalization calls exhausted for this subagent."));
     // No advice: the escape hatch has already been consumed.
-    assert.ok(!message.includes("If you have write access"));
+    assert.ok(!message.includes("If you have the write tool"));
     // A post-latch remaining-count rejection (slots still open) also omits
     // the advice.
     let caughtRemaining: unknown;
@@ -1766,7 +1766,7 @@ describe("handover escape hatch (one-time scratch handover)", () => {
       { sessionID: "sH", model: "m" },
       { system: after },
     );
-    assert.ok(!after[0]!.includes("If you have write access"));
+    assert.ok(!after[0]!.includes("If you have the write tool"));
     // The handover did not consume a finalization slot.
     assert.ok(after[0]!.includes("finalization: 0/2 used"));
     // A further handover write attempt is blocked even though slots remain.
@@ -1821,7 +1821,7 @@ describe("handover escape hatch (one-time scratch handover)", () => {
       ),
     );
     assert.ok(
-      !(caught as CapacityLimitError).message.includes("If you have write access"),
+      !(caught as CapacityLimitError).message.includes("If you have the write tool"),
     );
     // The status line advertises the path for the fresh uncapped session...
     const hooks = await server({} as unknown as PluginInput, makeConfig(legacyConfig) as unknown as PluginOptions);
