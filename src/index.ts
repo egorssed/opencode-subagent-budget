@@ -1,4 +1,4 @@
-import type { Hooks, Plugin, PluginInput, PluginOptions } from "@opencode-ai/plugin";
+import type { Hooks, Plugin, PluginInput, PluginOptions, PluginModule } from "@opencode-ai/plugin";
 import { resolveConfig } from "./config.ts";
 import { estimateArgsTokens } from "./core/estimator.ts";
 import { SessionStateManager } from "./core/state.ts";
@@ -65,4 +65,4 @@ export const server: Plugin = async (
   };
 };
 
-export default server;
+export default { id: "opencode-context-guard", server } satisfies PluginModule;
