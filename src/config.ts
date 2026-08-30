@@ -7,18 +7,52 @@ import type {
   ResolvedContextGuardConfig,
 } from "./types.js";
 
+// Baked-in per-agent budgets mirroring the AGENT_RESTRICTION_TABLE in
+// docs/reference/subagent-budget-core.ts. These are enforced even when no
+// per-agent options are provided; explicit tuple options still win per-field.
+export const REFERENCE_AGENT_BUDGETS: Record<string, AgentCapacityProfile> = {
+  "web-researcher": { maxTools: 9, maxTokens: 24000 },
+  "unbiased-collector": { maxTools: 14, maxTokens: 48000 },
+  "file-explorer": { maxTools: 15, maxTokens: 50000 },
+  "hoare-spec-formalizer": { maxTools: 4, maxTokens: 10000 },
+  "hoare-checks": { maxTools: 10, maxTokens: 18000 },
+  "hoare-planner": { maxTools: 4, maxTokens: 12000 },
+  "hoare-plan-verifier": { maxTools: 5, maxTokens: 12000 },
+  "hoare-impl-verifier": { maxTools: 12, maxTokens: 24000 },
+  "code-reviewer": { maxTools: 12, maxTokens: 18000 },
+  "security-reviewer": { maxTools: 14, maxTokens: 24000 },
+  planner: {
+    maxTools: 15,
+    maxTokens: 18000,
+    finalization: { allowedTools: ["write", "edit", "apply_patch"] },
+  },
+  "doc-writer": {
+    maxTools: 10,
+    maxTokens: 10000,
+    finalization: { allowedTools: ["write", "edit", "apply_patch"] },
+  },
+  coder: {
+    maxTools: 24,
+    maxTokens: 48000,
+    finalization: { allowedTools: ["write", "edit", "apply_patch"] },
+  },
+  "test-builder": { maxTools: 1, maxTokens: 4000 },
+};
+
+const DEFAULT_DEFAULTS: ResolvedContextGuardConfig["defaults"] = {
+  maxTools: 15,
+  maxTokens: 40000,
+  finalization: {
+    allowedTools: [],
+    allowedPaths: [],
+  },
+};
+
 export const DEFAULT_CONFIG: ResolvedContextGuardConfig = {
   enabled: true,
   primaryAgents: ["build", "plan", "orchestrator"],
-  defaults: {
-    maxTools: 15,
-    maxTokens: 40000,
-    finalization: {
-      allowedTools: [],
-      allowedPaths: [],
-    },
-  },
-  agents: {},
+  defaults: DEFAULT_DEFAULTS,
+  agents: resolveBakedAgents(DEFAULT_DEFAULTS),
 };
 
 const ENV_ENABLED = "OPENCODE_CONTEXT_GUARD_ENABLED";
@@ -83,6 +117,16 @@ function resolveFinalization(
   };
 }
 
+function resolveBakedAgents(
+  defaults: ResolvedContextGuardConfig["defaults"],
+): Record<string, ResolvedAgentCapacityProfile> {
+  const agents: Record<string, ResolvedAgentCapacityProfile> = {};
+  for (const [name, profile] of Object.entries(REFERENCE_AGENT_BUDGETS)) {
+    agents[name] = resolveAgentProfile(profile, defaults);
+  }
+  return agents;
+}
+
 function resolveAgentProfile(
   profile: AgentCapacityProfile | undefined,
   defaults: ResolvedContextGuardConfig["defaults"],
@@ -114,8 +158,29 @@ export function resolveConfig(options?: PluginOptions): ResolvedContextGuardConf
   };
 
   const agents: Record<string, ResolvedAgentCapacityProfile> = {};
-  for (const [name, profile] of Object.entries(raw.agents ?? {})) {
-    agents[name] = resolveAgentProfile(profile, defaults);
+  const names = new Set([...Object.keys(REFERENCE_AGENT_BUDGETS), ...Object.keys(raw.agents ?? {})]);
+  for (const name of names) {
+    const base = REFERENCE_AGENT_BUDGETS[name];
+    const override = raw.agents?.[name];
+    if (!base) {
+      agents[name] = resolveAgentProfile(override, defaults);
+    } else if (!override) {
+      agents[name] = resolveAgentProfile(base, defaults);
+    } else {
+      // Per-field merge: explicit option fields win over the baked budget.
+      agents[name] = resolveAgentProfile(
+        {
+          enabled: override.enabled ?? base.enabled,
+          maxTools: override.maxTools ?? base.maxTools,
+          maxTokens: override.maxTokens ?? base.maxTokens,
+          finalization: {
+            allowedTools: override.finalization?.allowedTools ?? base.finalization?.allowedTools,
+            allowedPaths: override.finalization?.allowedPaths ?? base.finalization?.allowedPaths,
+          },
+        },
+        defaults,
+      );
+    }
   }
 
   return {

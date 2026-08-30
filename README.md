@@ -91,6 +91,29 @@ The plugin accepts an optional options tuple in `opencode.jsonc`:
 | `defaults.finalization` | `object` | `{ "allowedTools": [], "allowedPaths": [] }` | Tools/paths permitted once in `finalization`. |
 | `agents` | `object` | `{}` | Per-agent overrides: `enabled`, `maxTools`, `maxTokens`, `finalization`. |
 
+### Baked-in agent budgets
+
+When no options are provided, the plugin enforces the following per-agent budgets (mirroring the reference `AGENT_RESTRICTION_TABLE`):
+
+| Agent | `maxTools` | `maxTokens` | `finalization.allowedTools` |
+| :--- | :--- | :--- | :--- |
+| `web-researcher` | 9 | 24000 | — |
+| `unbiased-collector` | 14 | 48000 | — |
+| `file-explorer` | 15 | 50000 | — |
+| `hoare-spec-formalizer` | 4 | 10000 | — |
+| `hoare-checks` | 10 | 18000 | — |
+| `hoare-planner` | 4 | 12000 | — |
+| `hoare-plan-verifier` | 5 | 12000 | — |
+| `hoare-impl-verifier` | 12 | 24000 | — |
+| `code-reviewer` | 12 | 18000 | — |
+| `security-reviewer` | 14 | 24000 | — |
+| `planner` | 15 | 18000 | `write`, `edit`, `apply_patch` |
+| `doc-writer` | 10 | 10000 | `write`, `edit`, `apply_patch` |
+| `coder` | 24 | 48000 | `write`, `edit`, `apply_patch` |
+| `test-builder` | 1 | 4000 | — |
+
+Explicit tuple options override the baked budgets per field: e.g. `agents.coder { "maxTools": 5 }` lowers `maxTools` to 5 while `maxTokens` stays 48000. Agents not in the table keep using `defaults`.
+
 ### Environment variables
 
 | Variable | Effect |

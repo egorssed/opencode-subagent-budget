@@ -57,6 +57,63 @@ async function callHook(
   );
 }
 
+describe("baked-in reference agent budgets", () => {
+  test("no options yields baked budgets for known agents", () => {
+    const config = resolveConfig();
+    assert.deepEqual(config.agents.coder, {
+      enabled: true,
+      enabledExplicit: false,
+      maxTools: 24,
+      maxTokens: 48000,
+      finalization: { allowedTools: ["write", "edit", "apply_patch"], allowedPaths: [] },
+    });
+    assert.deepEqual(config.agents.planner, {
+      enabled: true,
+      enabledExplicit: false,
+      maxTools: 15,
+      maxTokens: 18000,
+      finalization: { allowedTools: ["write", "edit", "apply_patch"], allowedPaths: [] },
+    });
+    assert.deepEqual(config.agents["test-builder"], {
+      enabled: true,
+      enabledExplicit: false,
+      maxTools: 1,
+      maxTokens: 4000,
+      finalization: { allowedTools: [], allowedPaths: [] },
+    });
+    assert.deepEqual(config.agents["file-explorer"], {
+      enabled: true,
+      enabledExplicit: false,
+      maxTools: 15,
+      maxTokens: 50000,
+      finalization: { allowedTools: [], allowedPaths: [] },
+    });
+  });
+
+  test("explicit agent override wins per-field over baked budget", () => {
+    const config = makeConfig({ agents: { coder: { maxTools: 5 } } });
+    assert.equal(config.agents.coder.maxTools, 5);
+    assert.equal(config.agents.coder.maxTokens, 48000);
+    assert.deepEqual(config.agents.coder.finalization.allowedTools, [
+      "write",
+      "edit",
+      "apply_patch",
+    ]);
+  });
+
+  test("other baked agents survive an explicit override for one agent", () => {
+    const config = makeConfig({ agents: { coder: { maxTools: 5 } } });
+    assert.equal(config.agents["file-explorer"].maxTools, 15);
+    assert.equal(config.agents["security-reviewer"].maxTokens, 24000);
+  });
+
+  test("agent only present in options still resolves", () => {
+    const config = makeConfig({ agents: { explore: { maxTools: 3 } } });
+    assert.equal(config.agents.explore.maxTools, 3);
+    assert.equal(config.agents.explore.maxTokens, 40000);
+  });
+});
+
 describe("resolveConfig hierarchical resolution", () => {
   test("no options resolves to DEFAULT_CONFIG", () => {
     assert.deepEqual(resolveConfig(), DEFAULT_CONFIG);
