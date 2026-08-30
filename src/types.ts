@@ -29,6 +29,10 @@ export interface ResolvedAgentCapacityProfile {
   maxTools: number;
   maxTokens: number;
   finalization: FinalizationPolicy;
+  /** Tool names that do not count against the tool budget; undefined when unset. */
+  whitelistedTools?: string[];
+  /** Remaining finalization calls; 0/undefined means unset (positive-integer convention). */
+  finalizationRemaining?: number;
 }
 
 export interface ResolvedContextGuardConfig {
@@ -56,6 +60,18 @@ export interface SessionGuardState {
   tokensInput: number;
   tokensOutput: number;
   tokensIngested: number;
+  /**
+   * Provider ground truth for context size: the first observed assistant
+   * token count (input + cache.read) for this session; null until an
+   * assistant token event arrives.
+   */
+  baselineContextTokens: number | null;
+  /** Most recent observed assistant token count; null until any arrives. */
+  latestContextTokens: number | null;
+  /** Message id of the most recent accepted assistant token observation. */
+  lastTokenMessageId: string | null;
+  finalizationToolsUsed: number;
+  isHandoverWritten: boolean;
   exhaustionReason: ExhaustionReason | null;
   createdAt: number;
   lastActiveAt: number;
@@ -71,6 +87,8 @@ export interface AgentCapacityProfile {
   maxTools?: number;
   maxTokens?: number;
   finalization?: Partial<FinalizationPolicy>;
+  whitelistedTools?: string[];
+  finalizationRemaining?: number;
 }
 
 export interface ContextGuardConfig {

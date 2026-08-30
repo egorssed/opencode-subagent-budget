@@ -13,28 +13,34 @@ import type {
 export const REFERENCE_AGENT_BUDGETS: Record<string, AgentCapacityProfile> = {
   "web-researcher": { maxTools: 9, maxTokens: 24000 },
   "unbiased-collector": { maxTools: 14, maxTokens: 48000 },
-  "file-explorer": { maxTools: 15, maxTokens: 50000 },
+  "file-explorer": { maxTools: 15, maxTokens: 50000, whitelistedTools: ["lsp"] },
   "hoare-spec-formalizer": { maxTools: 4, maxTokens: 10000 },
   "hoare-checks": { maxTools: 10, maxTokens: 18000 },
   "hoare-planner": { maxTools: 4, maxTokens: 12000 },
   "hoare-plan-verifier": { maxTools: 5, maxTokens: 12000 },
   "hoare-impl-verifier": { maxTools: 12, maxTokens: 24000 },
-  "code-reviewer": { maxTools: 12, maxTokens: 18000 },
-  "security-reviewer": { maxTools: 14, maxTokens: 24000 },
+  "code-reviewer": { maxTools: 12, maxTokens: 18000, whitelistedTools: ["lsp"] },
+  "security-reviewer": { maxTools: 14, maxTokens: 24000, whitelistedTools: ["lsp"] },
   planner: {
     maxTools: 15,
     maxTokens: 18000,
+    finalizationRemaining: 2,
     finalization: { allowedTools: ["write", "edit", "apply_patch"] },
+    whitelistedTools: ["lsp"],
   },
   "doc-writer": {
     maxTools: 10,
     maxTokens: 10000,
+    finalizationRemaining: 2,
     finalization: { allowedTools: ["write", "edit", "apply_patch"] },
+    whitelistedTools: ["lsp"],
   },
   coder: {
     maxTools: 24,
     maxTokens: 48000,
+    finalizationRemaining: 3,
     finalization: { allowedTools: ["write", "edit", "apply_patch"] },
+    whitelistedTools: ["context7*", "task", "lsp"],
   },
   "test-builder": { maxTools: 1, maxTokens: 4000 },
 };
@@ -133,12 +139,18 @@ function resolveAgentProfile(
 ): ResolvedAgentCapacityProfile {
   const maxTools = profile?.maxTools;
   const maxTokens = profile?.maxTokens;
+  const whitelistedTools = profile?.whitelistedTools;
+  const finalizationRemaining = profile?.finalizationRemaining;
   return {
     enabled: profile?.enabled ?? true,
     enabledExplicit: profile?.enabled === true,
     maxTools: isPositiveInt(maxTools) ? maxTools : defaults.maxTools,
     maxTokens: isPositiveInt(maxTokens) ? maxTokens : defaults.maxTokens,
     finalization: resolveFinalization(defaults.finalization, profile?.finalization),
+    // Copy configured arrays so resolution never aliases or mutates the input.
+    whitelistedTools: whitelistedTools ? [...whitelistedTools] : undefined,
+    // Positive-integer convention: 0 (or any non-positive value) means unset.
+    finalizationRemaining: isPositiveInt(finalizationRemaining) ? finalizationRemaining : undefined,
   };
 }
 
@@ -177,6 +189,9 @@ export function resolveConfig(options?: PluginOptions): ResolvedContextGuardConf
             allowedTools: override.finalization?.allowedTools ?? base.finalization?.allowedTools,
             allowedPaths: override.finalization?.allowedPaths ?? base.finalization?.allowedPaths,
           },
+          whitelistedTools: override.whitelistedTools ?? base.whitelistedTools,
+          finalizationRemaining:
+            override.finalizationRemaining ?? base.finalizationRemaining,
         },
         defaults,
       );
