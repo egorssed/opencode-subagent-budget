@@ -17,7 +17,7 @@ export const REFERENCE_AGENT_BUDGETS: Record<string, AgentCapacityProfile> = {
     maxTools: 15,
     maxTokens: 50000,
     whitelistedTools: [
-      "lsp",
+      "lsp","todo*",
       { name: "read", allowedPaths: [".agent_file_explorer.md"] },
       { name: "write", allowedPaths: [".agent_file_explorer.md"] },
       { name: "edit", allowedPaths: [".agent_file_explorer.md"] },
@@ -36,7 +36,7 @@ export const REFERENCE_AGENT_BUDGETS: Record<string, AgentCapacityProfile> = {
       allowedTools: ["read", "write", "edit"],
       allowedPaths: [".agent_file_explorer.md","docs/*.md"],
     },
-    whitelistedTools: ["lsp", 'task',
+    whitelistedTools: ["lsp", 'task',"todo*",
       { name: "read", allowedPaths: [".agent_planner.md","docs/*.md"] },
       { name: "write", allowedPaths: [".agent_planner.md","docs/*.md"] },
       { name: "edit", allowedPaths: [".agent_planner.md","docs/*.md"] },
@@ -46,20 +46,20 @@ export const REFERENCE_AGENT_BUDGETS: Record<string, AgentCapacityProfile> = {
   "doc-writer": {
     maxTools: 10,
     maxTokens: 10000,
-    finalizationRemaining: 2,
+    finalizationRemaining: 5,
     finalization: { allowedTools: ["write", "edit", "apply_patch"] },
-    whitelistedTools: ["lsp"],
+    whitelistedTools: ["lsp","todo*",],
   },
   coder: {
     maxTools: 24,
     maxTokens: 48000,
-    finalizationRemaining: 3,
+    finalizationRemaining: 10,
     finalization: { allowedTools: ["write", "edit", "apply_patch"] },
-    whitelistedTools: ["context7*", "task", "lsp",
-      { name: "read", allowedPaths: [".agent_coder.md","docs/*.md"] },
-      { name: "write", allowedPaths: [".agent_coder.md","docs/*.md"] },
-      { name: "edit", allowedPaths: [".agent_coder.md","docs/*.md"] },
-      { name: "apply_patch", allowedPaths: [".agent_coder.md","docs/*.md"] }],
+    whitelistedTools: ["context7*", "task", "lsp", "todo*",
+      { name: "read", allowedPaths: [".agent_coder.md"] },
+      { name: "write", allowedPaths: [".agent_coder.md"] },
+      { name: "edit", allowedPaths: [".agent_coder.md"] },
+      { name: "apply_patch", allowedPaths: [".agent_coder.md"] }],
   }
 };
 
