@@ -148,6 +148,12 @@ export function pathMatchesPattern(
  * allowedPaths for wildcard path scoping; string entries or structured entries
  * omitting allowedPaths are unrestricted ("*").
  */
+export function toolMatchesPattern(toolName: string, pattern: string): boolean {
+  if (pattern === toolName) return true;
+  if (!/[?*]/.test(pattern)) return false;
+  return globPatternToRegExp(pattern).test(toolName);
+}
+
 export function matchesWhitelist(
   toolName: string,
   patterns?: WhitelistedToolEntry[],
@@ -158,17 +164,14 @@ export function matchesWhitelist(
   if (!patterns || patterns.length === 0) return false;
   const targetPath = args !== undefined ? extractTargetPath(args) : undefined;
   return patterns.some((entry) => {
-    const name = typeof entry === "string" ? entry : entry.name;
-    const nameMatches = name.endsWith("*")
-      ? toolName.startsWith(name.slice(0, -1))
-      : toolName === name;
-    if (!nameMatches) return false;
+    const pattern = typeof entry === "string" ? entry : entry.name;
+    if (!toolMatchesPattern(toolName, pattern)) return false;
     if (typeof entry === "string" || entry.allowedPaths === undefined) {
       return true;
     }
     if (targetPath === undefined) return false;
-    return entry.allowedPaths.some((pattern) =>
-      pathMatchesPattern(targetPath, pattern, workspaceRoot),
+    return entry.allowedPaths.some((pathPattern) =>
+      pathMatchesPattern(targetPath, pathPattern, workspaceRoot),
     );
   });
 }
@@ -476,7 +479,9 @@ export class SessionStateManager {
       if (session.finalizationToolsUsed >= profile.finalizationRemaining) return false;
     }
 
-    if (!policy.allowedTools.includes(toolName)) return false;
+    if (!policy.allowedTools.some((pattern) => toolMatchesPattern(toolName, pattern))) {
+      return false;
+    }
 
     const targetPath = extractTargetPath(args);
     const allowedPaths = policy.allowedPaths;

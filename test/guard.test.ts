@@ -16,6 +16,7 @@ import {
   formatCapacityBreachMessage,
   matchesWhitelist,
   pathMatchesPattern,
+  toolMatchesPattern,
   SessionStateManager,
 } from "../src/core/state.ts";
 import type {
@@ -62,125 +63,39 @@ async function callHook(
   );
 }
 
-describe("baked-in reference agent budgets", () => {
-  test("no options yields baked budgets for known agents", () => {
-    const config = resolveConfig();
-    assert.deepEqual(config.agents.coder, {
-      enabled: true,
-      enabledExplicit: false,
-      maxTools: 24,
-      maxTokens: 48000,
-      finalization: { allowedTools: ["write", "edit", "apply_patch"], allowedPaths: [] },
-      whitelistedTools: ["context7*", "task", "lsp"],
-      finalizationRemaining: 3,
-    });
-    assert.deepEqual(config.agents.planner, {
-      enabled: true,
-      enabledExplicit: false,
-      maxTools: 15,
-      maxTokens: 18000,
-      finalization: { allowedTools: ["write", "edit", "apply_patch"], allowedPaths: [] },
-      whitelistedTools: ["lsp"],
-      finalizationRemaining: 2,
-    });
-    assert.deepEqual(config.agents["test-builder"], {
-      enabled: true,
-      enabledExplicit: false,
-      maxTools: 1,
-      maxTokens: 4000,
-      finalization: { allowedTools: [], allowedPaths: [] },
-      whitelistedTools: undefined,
-      finalizationRemaining: undefined,
-    });
-    assert.deepEqual(config.agents["file-explorer"], {
-      enabled: true,
-      enabledExplicit: false,
-      maxTools: 15,
-      maxTokens: 50000,
-      finalization: { allowedTools: ["read", "write", "edit"], allowedPaths: [".agent_file_explorer.md"] },
-      whitelistedTools: [
-        "lsp",
-        { name: "read", allowedPaths: [".agent_file_explorer.md"] },
-        { name: "write", allowedPaths: [".agent_file_explorer.md"] },
-        { name: "edit", allowedPaths: [".agent_file_explorer.md"] },
-      ],
-      finalizationRemaining: undefined,
-    });
+describe("agent budget resolution and overrides", () => {
+  test("explicit agent override wins per-field over base budget", () => {
+    const config = makeConfig({ agents: { custom: { maxTools: 5, maxTokens: 10000, finalizationRemaining: 3 } } });
+    assert.equal(config.agents.custom.maxTools, 5);
+    assert.equal(config.agents.custom.maxTokens, 10000);
+    assert.equal(config.agents.custom.finalizationRemaining, 3);
   });
 
-  test("baked whitelistedTools and finalizationRemaining cover every scoped agent", () => {
-    const config = resolveConfig();
-    assert.deepEqual(config.agents["doc-writer"].whitelistedTools, ["lsp"]);
-    assert.equal(config.agents["doc-writer"].finalizationRemaining, 2);
-    assert.deepEqual(config.agents["code-reviewer"].whitelistedTools, ["lsp"]);
-    assert.equal(config.agents["code-reviewer"].finalizationRemaining, undefined);
-    assert.deepEqual(config.agents["security-reviewer"].whitelistedTools, ["lsp"]);
-    assert.equal(config.agents["security-reviewer"].finalizationRemaining, undefined);
-    for (const name of [
-      "web-researcher",
-      "unbiased-collector",
-      "hoare-spec-formalizer",
-      "hoare-checks",
-      "hoare-planner",
-      "hoare-plan-verifier",
-      "hoare-impl-verifier",
-      "test-builder",
-    ]) {
-      assert.equal(config.agents[name].whitelistedTools, undefined, name);
-      assert.equal(config.agents[name].finalizationRemaining, undefined, name);
-    }
-  });
-
-  test("explicit agent override wins per-field over baked budget", () => {
-    const config = makeConfig({ agents: { coder: { maxTools: 5 } } });
-    assert.equal(config.agents.coder.maxTools, 5);
-    assert.equal(config.agents.coder.maxTokens, 48000);
-    assert.deepEqual(config.agents.coder.finalization.allowedTools, [
-      "write",
-      "edit",
-      "apply_patch",
-    ]);
-    assert.deepEqual(config.agents.coder.whitelistedTools, ["context7*", "task", "lsp"]);
-    assert.equal(config.agents.coder.finalizationRemaining, 3);
-  });
-
-  test("explicit whitelistedTools replaces baked value without touching finalizationRemaining", () => {
-    const config = makeConfig({ agents: { coder: { whitelistedTools: ["lsp"] } } });
-    assert.deepEqual(config.agents.coder.whitelistedTools, ["lsp"]);
-    assert.equal(config.agents.coder.finalizationRemaining, 3);
-  });
-
-  test("explicit finalizationRemaining replaces baked value without touching whitelistedTools", () => {
-    const config = makeConfig({ agents: { planner: { finalizationRemaining: 1 } } });
-    assert.equal(config.agents.planner.finalizationRemaining, 1);
-    assert.deepEqual(config.agents.planner.whitelistedTools, ["lsp"]);
+  test("explicit whitelistedTools merges without touching finalizationRemaining", () => {
+    const config = makeConfig({ agents: { custom: { maxTools: 5, whitelistedTools: ["lsp"], finalizationRemaining: 3 } } });
+    assert.deepEqual(config.agents.custom.whitelistedTools, ["lsp"]);
+    assert.equal(config.agents.custom.finalizationRemaining, 3);
   });
 
   test("explicit finalizationRemaining 0 falls back to unset", () => {
-    const config = makeConfig({ agents: { coder: { finalizationRemaining: 0 } } });
-    assert.equal(config.agents.coder.finalizationRemaining, undefined);
+    const config = makeConfig({ agents: { custom: { finalizationRemaining: 0 } } });
+    assert.equal(config.agents.custom.finalizationRemaining, undefined);
   });
 
   test("resolved whitelistedTools is a copy, not the configured array", () => {
     const entry = { name: "read", allowedPaths: [".cheatsheet.md"] };
     const whitelistedTools = ["lsp", entry];
-    const config = makeConfig({ agents: { coder: { whitelistedTools } } });
-    assert.deepEqual(config.agents.coder.whitelistedTools, ["lsp", entry]);
-    assert.notEqual(config.agents.coder.whitelistedTools, whitelistedTools);
-    assert.notEqual(config.agents.coder.whitelistedTools![1], entry);
+    const config = makeConfig({ agents: { custom: { whitelistedTools } } });
+    assert.deepEqual(config.agents.custom.whitelistedTools, ["lsp", entry]);
+    assert.notEqual(config.agents.custom.whitelistedTools, whitelistedTools);
+    assert.notEqual(config.agents.custom.whitelistedTools![1], entry);
     assert.notEqual(
-      (config.agents.coder.whitelistedTools![1] as { allowedPaths?: string[] }).allowedPaths,
+      (config.agents.custom.whitelistedTools![1] as { allowedPaths?: string[] }).allowedPaths,
       entry.allowedPaths,
     );
   });
 
-  test("other baked agents survive an explicit override for one agent", () => {
-    const config = makeConfig({ agents: { coder: { maxTools: 5 } } });
-    assert.equal(config.agents["file-explorer"].maxTools, 15);
-    assert.equal(config.agents["security-reviewer"].maxTokens, 24000);
-  });
-
-  test("agent only present in options still resolves", () => {
+  test("agent only present in options still resolves with defaults", () => {
     const config = makeConfig({ agents: { explore: { maxTools: 3 } } });
     assert.equal(config.agents.explore.maxTools, 3);
     assert.equal(config.agents.explore.maxTokens, 40000);
@@ -643,6 +558,21 @@ describe("finalization whitelist enforcement", () => {
     assert.equal(m.isOperationPermittedInFinalization("s1", "write", { filePath: "/anywhere/x.md" }), true);
   });
 
+  test("finalization allowedTools supports wildcards", () => {
+    const m = new SessionStateManager(
+      makeConfig({
+        agents: {
+          w: { maxTools: 1, finalization: { allowedTools: ["todo*", "write_*"], allowedPaths: [] } },
+        },
+      }),
+    );
+    m.getOrCreateSession("s1", "w");
+    m.transitionToFinalization("s1", "manual");
+    assert.equal(m.isOperationPermittedInFinalization("s1", "todowrite", {}), true);
+    assert.equal(m.isOperationPermittedInFinalization("s1", "write_file", {}), true);
+    assert.equal(m.isOperationPermittedInFinalization("s1", "read", {}), false);
+  });
+
   test("assertOperationPermitted allows whitelisted operation", () => {
     const m = exhaustedWriter();
     assert.doesNotThrow(() =>
@@ -1062,15 +992,25 @@ describe("whitelisted tool accounting", () => {
     assert.equal(matchesWhitelist("mytodo"), false);
   });
 
-  test("matchesWhitelist: exact and trailing-star prefix patterns", () => {
+  test("toolMatchesPattern wildcard support", () => {
+    assert.equal(toolMatchesPattern("todo_write", "todo*"), true);
+    assert.equal(toolMatchesPattern("todowrite", "todo*"), true);
+    assert.equal(toolMatchesPattern("mytodo", "*todo*"), true);
+    assert.equal(toolMatchesPattern("tool_v1", "tool_?1"), true);
+    assert.equal(toolMatchesPattern("tool_v12", "tool_?1"), false);
+    assert.equal(toolMatchesPattern("exact", "exact"), true);
+    assert.equal(toolMatchesPattern("other", "exact"), false);
+  });
+
+  test("matchesWhitelist: exact and wildcard patterns", () => {
     assert.equal(matchesWhitelist("lsp", ["lsp"]), true);
     assert.equal(matchesWhitelist("lsp", ["context7*", "lsp"]), true);
     assert.equal(matchesWhitelist("context7-docs", ["context7*"]), true);
     assert.equal(matchesWhitelist("context7-docs", ["context7"]), false);
     assert.equal(matchesWhitelist("bash", ["context7*", "lsp"]), false);
     assert.equal(matchesWhitelist("anything", ["*"]), true);
-    // Only a trailing star means prefix; no other glob syntax is supported.
     assert.equal(matchesWhitelist("webfoo", ["web*"]), true);
+    assert.equal(matchesWhitelist("webfoox", ["web*x"]), true);
     assert.equal(matchesWhitelist("webxfoo", ["web*x"]), false);
     assert.equal(matchesWhitelist("lsp"), false);
   });
@@ -1315,9 +1255,27 @@ describe("whitelisted tool accounting", () => {
     assert.equal(m.getSession("s1")!.toolCount, 0);
   });
 
-  test("baked file-explorer end-to-end: free operations in execution, scoped finalization enforcement after exhaustion", async () => {
-    const hooks = await server({} as unknown as PluginInput, makeConfig({}) as unknown as PluginOptions);
-    await callHook(hooks["chat.params"], { sessionID: "sFE", agent: "file-explorer" });
+  test("scoped agent end-to-end: free operations in execution, scoped finalization enforcement after exhaustion", async () => {
+    const explorerConfig = {
+      agents: {
+        "custom-explorer": {
+          maxTools: 3,
+          maxTokens: 50000,
+          whitelistedTools: [
+            "lsp",
+            { name: "read", allowedPaths: [".agent_file_explorer.md"] },
+            { name: "write", allowedPaths: [".agent_file_explorer.md"] },
+            { name: "edit", allowedPaths: [".agent_file_explorer.md"] },
+          ],
+          finalization: {
+            allowedTools: ["read", "write", "edit"],
+            allowedPaths: [".agent_file_explorer.md"],
+          },
+        },
+      },
+    };
+    const hooks = await server({} as unknown as PluginInput, makeConfig(explorerConfig) as unknown as PluginOptions);
+    await callHook(hooks["chat.params"], { sessionID: "sFE", agent: "custom-explorer" });
 
     await callHook(hooks["tool.execute.before"], { sessionID: "sFE", tool: "lsp" }, { args: { filePath: "src/a.ts" } });
     await callHook(hooks["tool.execute.after"], { sessionID: "sFE", tool: "lsp" }, { output: "syms", args: { filePath: "src/a.ts" } });
@@ -1363,9 +1321,20 @@ describe("whitelisted tool accounting", () => {
 });
 
 describe("bounded finalization (finalizationRemaining)", () => {
-  test("planner (R=2) transitions at 13 of 15 tools, not at maxTools", () => {
-    const m = new SessionStateManager(makeConfig({}));
-    m.getOrCreateSession("s1", "planner");
+  const boundedConfig = makeConfig({
+    agents: {
+      tester: {
+        maxTools: 15,
+        maxTokens: 18000,
+        finalizationRemaining: 2,
+        finalization: { allowedTools: ["write", "edit", "apply_patch"] },
+      },
+    },
+  });
+
+  test("bounded agent (R=2) transitions at 13 of 15 tools, not at maxTools", () => {
+    const m = new SessionStateManager(boundedConfig);
+    m.getOrCreateSession("s1", "tester");
     for (let i = 0; i < 12; i++) m.recordToolExecution("s1", "");
     assert.equal(m.getSession("s1")!.stage, "execution");
     m.recordToolExecution("s1", "");
@@ -1374,15 +1343,21 @@ describe("bounded finalization (finalizationRemaining)", () => {
     assert.equal(m.getSession("s1")!.finalizationToolsUsed, 0);
   });
 
-  test("doc-writer (R=2) transitions at 8 of 10; coder (R=3) at 21 of 24", () => {
-    const m = new SessionStateManager(makeConfig({}));
-    m.getOrCreateSession("d1", "doc-writer");
+  test("bounded profiles transition at maxTools - R", () => {
+    const cfg = makeConfig({
+      agents: {
+        a1: { maxTools: 10, finalizationRemaining: 2 },
+        a2: { maxTools: 24, finalizationRemaining: 3 },
+      },
+    });
+    const m = new SessionStateManager(cfg);
+    m.getOrCreateSession("d1", "a1");
     for (let i = 0; i < 7; i++) m.recordToolExecution("d1", "");
     assert.equal(m.getSession("d1")!.stage, "execution");
     m.recordToolExecution("d1", "");
     assert.equal(m.getSession("d1")!.stage, "finalization");
 
-    m.getOrCreateSession("c1", "coder");
+    m.getOrCreateSession("c1", "a2");
     for (let i = 0; i < 20; i++) m.recordToolExecution("c1", "");
     assert.equal(m.getSession("c1")!.stage, "execution");
     m.recordToolExecution("c1", "");
@@ -1390,9 +1365,8 @@ describe("bounded finalization (finalizationRemaining)", () => {
   });
 
   test("token exhaustion still transitions a configured profile", () => {
-    // Per-field merge keeps planner's baked R=2 and tool policy.
-    const m = new SessionStateManager(makeConfig({ agents: { planner: { maxTokens: 50 } } }));
-    m.getOrCreateSession("s1", "planner");
+    const m = new SessionStateManager(makeConfig({ agents: { tester: { maxTokens: 50, finalizationRemaining: 2 } } }));
+    m.getOrCreateSession("s1", "tester");
     m.recordTokens("s1", 50);
     const s = m.getSession("s1")!;
     assert.equal(s.stage, "finalization");
@@ -1401,8 +1375,8 @@ describe("bounded finalization (finalizationRemaining)", () => {
   });
 
   test("phase-entry call does not consume a finalization slot", () => {
-    const m = new SessionStateManager(makeConfig({}));
-    m.getOrCreateSession("s1", "planner");
+    const m = new SessionStateManager(boundedConfig);
+    m.getOrCreateSession("s1", "tester");
     for (let i = 0; i < 13; i++) m.recordToolExecution("s1", "");
     assert.equal(m.getSession("s1")!.stage, "finalization");
     // The 13th (entry-triggering) execution call left the allowance untouched.
@@ -1411,8 +1385,8 @@ describe("bounded finalization (finalizationRemaining)", () => {
   });
 
   test("finalization permits allowed policy calls and blocks others with remaining-count text", () => {
-    const m = new SessionStateManager(makeConfig({}));
-    m.getOrCreateSession("s1", "planner");
+    const m = new SessionStateManager(boundedConfig);
+    m.getOrCreateSession("s1", "tester");
     m.transitionToFinalization("s1", "tool_limit");
     assert.equal(m.isOperationPermittedInFinalization("s1", "write", {}), true);
     assert.equal(m.isOperationPermittedInFinalization("s1", "edit", {}), true);
@@ -1432,8 +1406,8 @@ describe("bounded finalization (finalizationRemaining)", () => {
   });
 
   test("successful finalization calls consume slots; blocked and attempted-only calls do not", () => {
-    const m = new SessionStateManager(makeConfig({}));
-    m.getOrCreateSession("s1", "planner");
+    const m = new SessionStateManager(boundedConfig);
+    m.getOrCreateSession("s1", "tester");
     m.transitionToFinalization("s1", "tool_limit");
     m.recordToolAttempt("s1");
     assert.equal(m.getSession("s1")!.finalizationToolsUsed, 0);
@@ -1460,8 +1434,8 @@ describe("bounded finalization (finalizationRemaining)", () => {
   });
 
   test("duplicate after-hook delivery is idempotent for finalization accounting", () => {
-    const m = new SessionStateManager(makeConfig({}));
-    m.getOrCreateSession("s1", "planner");
+    const m = new SessionStateManager(boundedConfig);
+    m.getOrCreateSession("s1", "tester");
     m.transitionToFinalization("s1", "tool_limit");
     m.recordToolSuccess("s1", 0, "", "c1", "write");
     m.recordToolSuccess("s1", 0, "", "c1", "write");
@@ -1494,8 +1468,8 @@ describe("bounded finalization (finalizationRemaining)", () => {
   });
 
   test("getRemainingBudget surfaces finalization values without changing legacy fields", () => {
-    const m = new SessionStateManager(makeConfig({}));
-    m.getOrCreateSession("s1", "planner");
+    const m = new SessionStateManager(boundedConfig);
+    m.getOrCreateSession("s1", "tester");
     m.recordToolExecution("s1", "");
     const execution = m.getRemainingBudget("s1")!;
     assert.equal(execution.finalizationRemaining, 2);
@@ -1510,8 +1484,8 @@ describe("bounded finalization (finalizationRemaining)", () => {
   });
 
   test("hook plumbing: entry notice, remaining-count block, LAST CALL, and exhausted block", async () => {
-    const hooks = await server({} as unknown as PluginInput, makeConfig({}) as unknown as PluginOptions);
-    await callHook(hooks["chat.params"], { sessionID: "sP", agent: "planner" });
+    const hooks = await server({} as unknown as PluginInput, boundedConfig as unknown as PluginOptions);
+    await callHook(hooks["chat.params"], { sessionID: "sP", agent: "tester" });
     for (let i = 0; i < 13; i++) {
       await callHook(hooks["tool.execute.before"], { sessionID: "sP", tool: "grep" }, { args: {} });
       await callHook(hooks["tool.execute.after"], { sessionID: "sP", tool: "grep" }, { output: "" });
@@ -1634,8 +1608,8 @@ describe("bounded finalization (finalizationRemaining)", () => {
   });
 
   test("configured execution-stage status line stays unchanged before finalization", async () => {
-    const hooks = await server({} as unknown as PluginInput, makeConfig({}) as unknown as PluginOptions);
-    await callHook(hooks["chat.params"], { sessionID: "sC", agent: "planner" });
+    const hooks = await server({} as unknown as PluginInput, boundedConfig as unknown as PluginOptions);
+    await callHook(hooks["chat.params"], { sessionID: "sC", agent: "tester" });
     await callHook(hooks["tool.execute.before"], { sessionID: "sC", tool: "grep" }, { args: {} });
     await callHook(hooks["tool.execute.after"], { sessionID: "sC", tool: "grep" }, { output: "" });
     const system: string[] = [];
