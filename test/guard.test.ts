@@ -585,11 +585,12 @@ describe("finalization whitelist enforcement", () => {
 
   test("assertOperationPermitted throws with contract message and fields", () => {
     const m = exhaustedWriter();
+    const finalization = { allowedTools: ["write", "edit"], allowedPaths: ["./reports/**"] };
     const expected = [
       '[Capacity Guard] Session limit reached for agent "@writer".',
       "Current stage: FINALIZATION",
       "Limit exceeded: tool_limit (Used: 2/2 tools, 0/99000 tokens).",
-      "Action required: Tool execution is restricted in finalization stage. Please summarize your findings or provide your final report in your text response.",
+      "Action required: Tool execution is restricted in finalization stage. Allowed tools: write, edit (allowed paths: ./reports/**). Summarize your findings and provide your report in your text response.",
     ].join("\n");
 
     let caught: unknown;
@@ -608,6 +609,7 @@ describe("finalization whitelist enforcement", () => {
     assert.equal(error.maxTools, 2);
     assert.equal(error.tokensIngested, 0);
     assert.equal(error.maxTokens, 99000);
+    assert.deepEqual(error.finalization, finalization);
     assert.equal(
       formatCapacityBreachMessage({
         agentName: "writer",
@@ -616,8 +618,32 @@ describe("finalization whitelist enforcement", () => {
         maxTools: 2,
         tokensIngested: 0,
         maxTokens: 99000,
+        finalization,
       }),
       expected,
+    );
+  });
+
+  test("pathMatchesPattern resolves relative paths against the workspace root", () => {
+    const workspaceRoot = "/workspace/project";
+    assert.equal(pathMatchesPattern("/workspace/project/.agent.md", ".agent.md", workspaceRoot), true);
+    assert.equal(pathMatchesPattern("/workspace/project/reports/a.md", "reports/**", workspaceRoot), true);
+    assert.equal(pathMatchesPattern("/outside/project/.agent.md", ".agent.md", workspaceRoot), false);
+    assert.equal(pathMatchesPattern("/outside/project/reports/a.md", "reports/**", workspaceRoot), false);
+    assert.equal(pathMatchesPattern("/outside/project/a.md", "/outside/project/**", workspaceRoot), true);
+    assert.equal(pathMatchesPattern("reports/a.md", "reports/**"), true);
+  });
+
+  test("finalization paths accept absolute runtime paths inside the workspace", () => {
+    const m = new SessionStateManager(makeConfig(writerConfig()), "/workspace/project");
+    m.getOrCreateSession("s1", "writer");
+    m.recordToolExecution("s1", "");
+    m.recordToolExecution("s1", "");
+    assert.equal(
+      m.isOperationPermittedInFinalization("s1", "write", {
+        filePath: "/workspace/project/reports/summary.md",
+      }),
+      true,
     );
   });
 
@@ -1000,6 +1026,26 @@ describe("whitelisted tool accounting", () => {
     const entries = [{ name: "read*", allowedPaths: ["docs/**"] }];
     assert.equal(matchesWhitelist("read", entries, { filePath: "docs/a.md" }), true);
     assert.equal(matchesWhitelist("read", entries, { filePath: "package.json" }), false);
+  });
+
+  test("matchesWhitelist: legacy strings and structured entries without allowedPaths remain unrestricted", () => {
+    assert.equal(matchesWhitelist("read", ["read"]), true);
+    assert.equal(matchesWhitelist("read", ["read"], {}), true);
+    assert.equal(matchesWhitelist("read", ["read"], { filePath: "src/index.ts" }), true);
+    assert.equal(matchesWhitelist("read", ["read"], { path: "README.md" }), true);
+
+    assert.equal(matchesWhitelist("read", [{ name: "read" }]), true);
+    assert.equal(matchesWhitelist("read", [{ name: "read" }], {}), true);
+    assert.equal(matchesWhitelist("read", [{ name: "read" }], { filePath: "src/index.ts" }), true);
+    assert.equal(matchesWhitelist("read", [{ name: "read" }], { path: "README.md" }), true);
+  });
+
+  test("matchesWhitelist resolves absolute runtime paths against the workspace root", () => {
+    const rules = [{ name: "read", allowedPaths: [".agent.md", "src/**"] }];
+    assert.equal(matchesWhitelist("read", rules, { filePath: "/workspace/project/.agent.md" }, "/workspace/project"), true);
+    assert.equal(matchesWhitelist("read", rules, { filePath: "/workspace/project/src/core/state.ts" }, "/workspace/project"), true);
+    assert.equal(matchesWhitelist("read", rules, { filePath: "/outside/project/.agent.md" }, "/workspace/project"), false);
+    assert.equal(matchesWhitelist("read", rules, { filePath: ".agent.md" }), true);
   });
 
   test("matchesWhitelist: always-free todo prefix and exact skill", () => {
