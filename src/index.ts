@@ -101,13 +101,6 @@ export const server: Plugin = async (
           line += ` 🚨 LAST CALL: This is your FINAL tool call. You must produce your deliverable NOW.`;
         }
       }
-      // Advertise the one-time scratch-handover escape hatch on every
-      // finalization status line while it remains available, whether or not
-      // the profile configures a finalization cap. Advice is gated on the
-      // resolved profile being write-capable (see handoverAdviceFor).
-      if (budget.stage === "finalization") {
-        line += stateManager.handoverAdvice(sessionID);
-      }
 
       output.system.push(line);
     },

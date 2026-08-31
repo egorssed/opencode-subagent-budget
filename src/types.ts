@@ -78,7 +78,6 @@ export interface SessionGuardState {
   /** Message id of the most recent accepted assistant token observation. */
   lastTokenMessageId: string | null;
   finalizationToolsUsed: number;
-  isHandoverWritten: boolean;
   exhaustionReason: ExhaustionReason | null;
   createdAt: number;
   lastActiveAt: number;

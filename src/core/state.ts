@@ -33,8 +33,6 @@ export interface SessionBudgetStatus {
   exhaustionReason: ExhaustionReason | null;
   exempt: boolean;
   finalizationToolsUsed: number;
-  /** One-time scratch-handover latch: true once the designated handover write succeeded. */
-  isHandoverWritten: boolean;
   /** Bounded finalization call cap; undefined when the profile does not configure it. */
   finalizationRemaining?: number;
 }
@@ -201,59 +199,6 @@ function extractTargetPath(args: Record<string, unknown>): string | undefined {
   return undefined;
 }
 
-const HANDOVER_WRITE_TOOLS = new Set(["write", "edit", "apply_patch"]);
-
-/**
- * Expected one-time scratch-handover file path for a session; undefined when
- * the session has no agent name to bind the path to.
- */
-function handoverTargetPath(session: SessionGuardState): string | undefined {
-  if (!session.agentName) return undefined;
-  return `Handovers/SCRATCH_${session.agentName}_${session.sessionID}.md`;
-}
-
-/**
- * Handover advice is only meaningful for agents that can actually perform the
- * recommended write: the resolved profile must allow at least one write-family
- * tool in its finalization policy. Read-only profiles get no advice, matching
- * the reference behavior where only write-capable agents were advised.
- */
-function profileAdvisesHandover(profile: ResolvedAgentCapacityProfile): boolean {
-  const allowedTools = profile.finalization.allowedTools;
-  if (!Array.isArray(allowedTools)) return false;
-  return allowedTools.some((tool) => HANDOVER_WRITE_TOOLS.has(tool));
-}
-
-function handoverAdviceFor(session: SessionGuardState, profile: ResolvedAgentCapacityProfile): string {
-  if (session.isHandoverWritten) return "";
-  if (!profileAdvisesHandover(profile)) return "";
-  const expected = handoverTargetPath(session);
-  if (expected === undefined) return "";
-  return ` If you have the write tool and the task remains unfinished, you may preserve the critical context so another agent can complete it efficiently. To do that, write the handover to ${expected}`;
-}
-
-/**
- * Recognizes only write-family calls (write, edit, apply_patch) whose target
- * file path equals — or ends with, on a slash boundary — the session's
- * designated `Handovers/SCRATCH_<agentName>_<sessionID>.md` handover file.
- * Requires a session agent name and a string target path; near-suffix paths
- * without a slash boundary and non-write-family tools never match.
- */
-function isHandoverTarget(
-  session: SessionGuardState,
-  toolName: string | undefined,
-  args: Record<string, unknown> | undefined,
-): boolean {
-  if (toolName === undefined || !HANDOVER_WRITE_TOOLS.has(toolName)) return false;
-  if (!session.agentName || args === undefined) return false;
-  const targetPath = extractTargetPath(args);
-  if (targetPath === undefined) return false;
-  const expected = handoverTargetPath(session);
-  if (expected === undefined) return false;
-  const normalized = normalizePath(targetPath);
-  return normalized === expected || normalized.endsWith(`/${expected}`);
-}
-
 export class SessionStateManager {
   private sessions = new Map<string, SessionGuardState>();
   private sessionConfigs = new Map<string, ResolvedContextGuardConfig>();
@@ -295,7 +240,6 @@ export class SessionStateManager {
       latestContextTokens: null,
       lastTokenMessageId: null,
       finalizationToolsUsed: 0,
-      isHandoverWritten: false,
       exhaustionReason: null,
       createdAt: now,
       lastActiveAt: now,
@@ -401,15 +345,6 @@ export class SessionStateManager {
     // tools; the whitelist only exempts toolCount. Gated on a configured cap
     // so profiles without finalizationRemaining keep their previous state.
     const beganInFinalization = session.stage === "finalization";
-    // The designated one-time handover write never consumes a finalization
-    // slot; its successful after-hook flips the one-time latch. Only calls
-    // that began in finalization count as handoverSuccess: an execution-stage
-    // call to the designated path is an ordinary call — it keeps ordinary
-    // accounting, does not consume the escape hatch, and may itself trigger
-    // the phase transition via advanceStage. Ordinary tool/success/token
-    // accounting applies to it unchanged.
-    const handoverSuccess =
-      beganInFinalization && isHandoverTarget(session, toolName, args);
     session.toolCallsSucceeded += 1;
     if (!whitelisted) session.toolCount += 1;
     session.tokensInput += Math.max(0, argsTokens);
@@ -425,12 +360,10 @@ export class SessionStateManager {
     this.advanceStage(session);
     if (
       beganInFinalization &&
-      effectiveProfile.finalizationRemaining !== undefined &&
-      !handoverSuccess
+      effectiveProfile.finalizationRemaining !== undefined
     ) {
       session.finalizationToolsUsed += 1;
     }
-    if (handoverSuccess) session.isHandoverWritten = true;
   }
 
   recordToolExecution(sessionID: string, outputText = ""): void {
@@ -518,15 +451,6 @@ export class SessionStateManager {
     const effectiveConfig = config ?? this.configForSession(sessionID);
     if (this.isAgentExempt(session.agentName, effectiveConfig)) return true;
 
-    // One-time handover escape hatch: the first write-family call targeting
-    // the session's designated scratch-handover file bypasses finalization
-    // allowedTools/allowedPaths and finalizationRemaining exhaustion. Once
-    // the handover has been written, further handover attempts block instead
-    // of falling through ordinary policy.
-    if (isHandoverTarget(session, toolName, args)) {
-      return !session.isHandoverWritten;
-    }
-
     // Resolve the effective profile exactly like every other enforcement
     // site; the defaults fallback never carries a finalization cap.
     const profile = this.resolveProfile(session.agentName, effectiveConfig);
@@ -570,50 +494,19 @@ export class SessionStateManager {
       tokensIngested: session.tokensIngested,
       maxTokens: profile.maxTokens,
     };
-    // Advertise the one-time handover escape hatch on every finalization
-    // rejection while it is still available — but only for profiles whose
-    // finalization policy allows a write-family tool; read-only agents cannot
-    // perform the recommended write and get no advice.
-    const handoverAdvice = handoverAdviceFor(session, profile);
-    // Bounded finalization uses reference-style cap messages instead of the
-    // generic breach format; profiles without a cap keep the legacy error.
     if (session.stage === "finalization" && profile.finalizationRemaining !== undefined) {
       const remaining = profile.finalizationRemaining - session.finalizationToolsUsed;
-      // A repeated designated-handover attempt blocks under the exhausted
-      // policy even while ordinary finalization slots remain.
-      const repeatHandover =
-        session.isHandoverWritten && isHandoverTarget(session, toolName, args);
-      if (remaining <= 0 || repeatHandover) {
+      if (remaining <= 0) {
         const message =
-          "Finalization calls exhausted for this subagent. Don't use more tools, henceforth they are blocked automatically. Proceed to report." +
-          handoverAdvice;
+          "Finalization calls exhausted for this subagent. Don't use more tools, henceforth they are blocked automatically. Proceed to report.";
         throw new CapacityLimitError(limitInfo, message);
       }
       throw new CapacityLimitError(
         limitInfo,
-        `Finalization: ${remaining} call(s) remaining. Only ${profile.finalization.allowedTools.join(", ")} allowed.${handoverAdvice}`,
+        `Finalization: ${remaining} call(s) remaining. Only ${profile.finalization.allowedTools.join(", ")} allowed.`,
       );
     }
-    // Uncapped legacy/generic finalization rejections keep the legacy breach
-    // format, extended with the same advice while the hatch is available.
-    throw new CapacityLimitError(
-      limitInfo,
-      handoverAdvice ? formatCapacityBreachMessage(limitInfo) + handoverAdvice : undefined,
-    );
-  }
-
-  /**
-   * Status-line accessor: the handover advice for a session's current state,
-   * or "" when the session is unknown, the profile is not write-capable, or
-   * the handover has already been written.
-   */
-  handoverAdvice(sessionID: string): string {
-    const session = this.sessions.get(sessionID);
-    if (!session) return "";
-    return handoverAdviceFor(
-      session,
-      this.resolveProfile(session.agentName, this.configForSession(sessionID)),
-    );
+    throw new CapacityLimitError(limitInfo);
   }
 
   getRemainingBudget(sessionID: string): SessionBudgetStatus | undefined {
@@ -638,7 +531,6 @@ export class SessionStateManager {
       exhaustionReason: session.exhaustionReason,
       exempt,
       finalizationToolsUsed: session.finalizationToolsUsed,
-      isHandoverWritten: session.isHandoverWritten,
       finalizationRemaining: profile.finalizationRemaining,
     };
   }
