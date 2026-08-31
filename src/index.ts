@@ -4,13 +4,13 @@ import { estimateArgsTokens } from "./core/estimator.ts";
 import { SessionStateManager } from "./core/state.ts";
 
 export const server: Plugin = async (
-  _input: PluginInput,
+  input: PluginInput,
   rawOptions?: PluginOptions,
 ): Promise<Hooks> => {
   const config = resolveConfig(rawOptions);
   if (!config.enabled) return {};
 
-  const stateManager = new SessionStateManager(config);
+  const stateManager = new SessionStateManager(config, input.directory);
   const sessionAgent = new Map<string, string>();
 
   return {

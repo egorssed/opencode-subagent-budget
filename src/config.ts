@@ -5,6 +5,7 @@ import type {
   FinalizationPolicy,
   ResolvedAgentCapacityProfile,
   ResolvedContextGuardConfig,
+  WhitelistedToolEntry,
 } from "./types.js";
 
 // Baked-in per-agent budgets mirroring the AGENT_RESTRICTION_TABLE in
@@ -13,7 +14,20 @@ import type {
 export const REFERENCE_AGENT_BUDGETS: Record<string, AgentCapacityProfile> = {
   "web-researcher": { maxTools: 9, maxTokens: 24000 },
   "unbiased-collector": { maxTools: 14, maxTokens: 48000 },
-  "file-explorer": { maxTools: 15, maxTokens: 50000, whitelistedTools: ["lsp"] },
+  "file-explorer": {
+    maxTools: 15,
+    maxTokens: 50000,
+    whitelistedTools: [
+      "lsp",
+      { name: "read", allowedPaths: [".agent_file_explorer.md"] },
+      { name: "write", allowedPaths: [".agent_file_explorer.md"] },
+      { name: "edit", allowedPaths: [".agent_file_explorer.md"] },
+    ],
+    finalization: {
+      allowedTools: ["read", "write", "edit"],
+      allowedPaths: [".agent_file_explorer.md"],
+    },
+  },
   "hoare-spec-formalizer": { maxTools: 4, maxTokens: 10000 },
   "hoare-checks": { maxTools: 10, maxTokens: 18000 },
   "hoare-planner": { maxTools: 4, maxTokens: 12000 },
@@ -148,7 +162,18 @@ function resolveAgentProfile(
     maxTokens: isPositiveInt(maxTokens) ? maxTokens : defaults.maxTokens,
     finalization: resolveFinalization(defaults.finalization, profile?.finalization),
     // Copy configured arrays so resolution never aliases or mutates the input.
-    whitelistedTools: whitelistedTools ? [...whitelistedTools] : undefined,
+    whitelistedTools: whitelistedTools
+      ? whitelistedTools.map((entry) =>
+          typeof entry === "string"
+            ? entry
+            : {
+                name: entry.name,
+                ...(entry.allowedPaths !== undefined
+                  ? { allowedPaths: [...entry.allowedPaths] }
+                  : {}),
+              },
+        )
+      : undefined,
     // Positive-integer convention: 0 (or any non-positive value) means unset.
     finalizationRemaining: isPositiveInt(finalizationRemaining) ? finalizationRemaining : undefined,
   };

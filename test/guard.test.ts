@@ -18,7 +18,11 @@ import {
   pathMatchesPattern,
   SessionStateManager,
 } from "../src/core/state.ts";
-import type { ContextGuardOptions, ResolvedContextGuardConfig } from "../src/types.ts";
+import type {
+  ContextGuardOptions,
+  ResolvedContextGuardConfig,
+  WhitelistedToolEntry,
+} from "../src/types.ts";
 import { server } from "../src/index.ts";
 
 const ENV_KEYS = [
@@ -97,8 +101,13 @@ describe("baked-in reference agent budgets", () => {
       enabledExplicit: false,
       maxTools: 15,
       maxTokens: 50000,
-      finalization: { allowedTools: [], allowedPaths: [] },
-      whitelistedTools: ["lsp"],
+      finalization: { allowedTools: ["read", "write", "edit"], allowedPaths: [".agent_file_explorer.md"] },
+      whitelistedTools: [
+        "lsp",
+        { name: "read", allowedPaths: [".agent_file_explorer.md"] },
+        { name: "write", allowedPaths: [".agent_file_explorer.md"] },
+        { name: "edit", allowedPaths: [".agent_file_explorer.md"] },
+      ],
       finalizationRemaining: undefined,
     });
   });
@@ -157,10 +166,16 @@ describe("baked-in reference agent budgets", () => {
   });
 
   test("resolved whitelistedTools is a copy, not the configured array", () => {
-    const whitelistedTools = ["lsp"];
+    const entry = { name: "read", allowedPaths: [".cheatsheet.md"] };
+    const whitelistedTools = ["lsp", entry];
     const config = makeConfig({ agents: { coder: { whitelistedTools } } });
-    assert.deepEqual(config.agents.coder.whitelistedTools, ["lsp"]);
+    assert.deepEqual(config.agents.coder.whitelistedTools, ["lsp", entry]);
     assert.notEqual(config.agents.coder.whitelistedTools, whitelistedTools);
+    assert.notEqual(config.agents.coder.whitelistedTools![1], entry);
+    assert.notEqual(
+      (config.agents.coder.whitelistedTools![1] as { allowedPaths?: string[] }).allowedPaths,
+      entry.allowedPaths,
+    );
   });
 
   test("other baked agents survive an explicit override for one agent", () => {
@@ -694,6 +709,30 @@ describe("finalization whitelist enforcement", () => {
     assert.equal(pathMatchesPattern("./src/a.ts", "./reports/**"), false);
     assert.equal(pathMatchesPattern("./x.md", ""), false);
   });
+
+  test("pathMatchesPattern resolves relative paths against the workspace root", () => {
+    const workspaceRoot = "/workspace/project";
+    assert.equal(pathMatchesPattern("/workspace/project/.agent.md", ".agent.md", workspaceRoot), true);
+    assert.equal(pathMatchesPattern("/workspace/project/reports/a.md", "reports/**", workspaceRoot), true);
+    assert.equal(pathMatchesPattern("/outside/project/.agent.md", ".agent.md", workspaceRoot), false);
+    assert.equal(pathMatchesPattern("/outside/project/reports/a.md", "reports/**", workspaceRoot), false);
+    assert.equal(pathMatchesPattern("/outside/project/a.md", "/outside/project/**", workspaceRoot), true);
+    assert.equal(pathMatchesPattern("reports/a.md", "reports/**"), true);
+    assert.equal(pathMatchesPattern("C:\\workspace\\project\\reports\\a.md", "reports/**", "C:/workspace/project"), true);
+  });
+
+  test("finalization paths accept absolute runtime paths inside the workspace", () => {
+    const m = new SessionStateManager(makeConfig(writerConfig()), "/workspace/project");
+    m.getOrCreateSession("s1", "writer");
+    m.recordToolExecution("s1", "");
+    m.recordToolExecution("s1", "");
+    assert.equal(
+      m.isOperationPermittedInFinalization("s1", "write", {
+        filePath: "/workspace/project/reports/summary.md",
+      }),
+      true,
+    );
+  });
 });
 
 describe("primary agent exemption", () => {
@@ -1160,6 +1199,170 @@ describe("whitelisted tool accounting", () => {
     await callHook(hooks["tool.execute.after"], { sessionID: "sX", tool: "glob" }, { output: "" });
     await assert.rejects(
       callHook(hooks["tool.execute.before"], { sessionID: "sX", tool: "read" }, { args: {} }),
+      CapacityLimitError,
+    );
+  });
+
+  test("matchesWhitelist: legacy strings and structured entries without allowedPaths remain unrestricted", () => {
+    assert.equal(matchesWhitelist("read", ["read"]), true);
+    assert.equal(matchesWhitelist("read", ["read"], {}), true);
+    assert.equal(matchesWhitelist("read", ["read"], { filePath: "src/index.ts" }), true);
+    assert.equal(matchesWhitelist("read", ["read"], { path: "README.md" }), true);
+
+    assert.equal(matchesWhitelist("read", [{ name: "read" }]), true);
+    assert.equal(matchesWhitelist("read", [{ name: "read" }], {}), true);
+    assert.equal(matchesWhitelist("read", [{ name: "read" }], { filePath: "src/index.ts" }), true);
+    assert.equal(matchesWhitelist("read", [{ name: "read" }], { path: "README.md" }), true);
+
+    assert.equal(matchesWhitelist("context7-docs", ["context7*"], { filePath: "any" }), true);
+    assert.equal(matchesWhitelist("context7-docs", [{ name: "context7*" }], { filePath: "any" }), true);
+  });
+
+  test("matchesWhitelist: path-scoped matching, wildcards, filePath precedence, and missing path handling", () => {
+    const cheatsheetRules: WhitelistedToolEntry[] = [
+      { name: "read", allowedPaths: [".cheatsheet.md"] },
+      { name: "write", allowedPaths: [".cheatsheet.md"] },
+    ];
+    assert.equal(matchesWhitelist("read", cheatsheetRules, { filePath: ".cheatsheet.md" }), true);
+    assert.equal(matchesWhitelist("read", cheatsheetRules, { path: ".cheatsheet.md" }), true);
+    assert.equal(matchesWhitelist("write", cheatsheetRules, { filePath: "./.cheatsheet.md" }), true);
+    assert.equal(matchesWhitelist("write", cheatsheetRules, { path: "./.cheatsheet.md" }), true);
+
+    assert.equal(matchesWhitelist("read", cheatsheetRules, { filePath: "other.md" }), false);
+    assert.equal(matchesWhitelist("read", cheatsheetRules, { path: "other.md" }), false);
+
+    assert.equal(matchesWhitelist("read", cheatsheetRules, {}), false);
+    assert.equal(matchesWhitelist("read", cheatsheetRules), false);
+    assert.equal(matchesWhitelist("read", cheatsheetRules, { filePath: "" }), false);
+    assert.equal(matchesWhitelist("read", cheatsheetRules, { other: "value" }), false);
+
+    const wildcardRules: WhitelistedToolEntry[] = [
+      { name: "read", allowedPaths: ["src/**", "*.ts"] },
+    ];
+    assert.equal(matchesWhitelist("read", wildcardRules, { filePath: "src/core/state.ts" }), true);
+    assert.equal(matchesWhitelist("read", wildcardRules, { filePath: "src/index.ts" }), true);
+    assert.equal(matchesWhitelist("read", wildcardRules, { filePath: "guard.ts" }), true);
+    assert.equal(matchesWhitelist("read", wildcardRules, { filePath: "guard.js" }), false);
+    assert.equal(matchesWhitelist("read", wildcardRules, { filePath: "docs/readme.md" }), false);
+
+    assert.equal(
+      matchesWhitelist("read", wildcardRules, { filePath: "src/core/state.ts", path: "docs/readme.md" }),
+      true,
+    );
+    assert.equal(
+      matchesWhitelist("read", wildcardRules, { filePath: "docs/readme.md", path: "src/core/state.ts" }),
+      false,
+    );
+  });
+
+  test("matchesWhitelist resolves absolute runtime paths against the workspace root", () => {
+    const rules: WhitelistedToolEntry[] = [{ name: "read", allowedPaths: [".agent.md", "src/**"] }];
+    assert.equal(matchesWhitelist("read", rules, { filePath: "/workspace/project/.agent.md" }, "/workspace/project"), true);
+    assert.equal(matchesWhitelist("read", rules, { filePath: "/workspace/project/src/core/state.ts" }, "/workspace/project"), true);
+    assert.equal(matchesWhitelist("read", rules, { filePath: "/outside/project/.agent.md" }, "/workspace/project"), false);
+    assert.equal(matchesWhitelist("read", rules, { filePath: ".agent.md" }), true);
+  });
+
+  test("execution-stage accounting: matching path-scoped calls do not increment toolCount, nonmatching/missing do", () => {
+    const m = new SessionStateManager(
+      makeConfig({
+        agents: {
+          scoped: {
+            maxTools: 10,
+            whitelistedTools: [
+              "lsp",
+              { name: "read", allowedPaths: [".cheatsheet.md"] },
+              { name: "write", allowedPaths: [".cheatsheet.md"] },
+            ],
+          },
+        },
+      }),
+    );
+    m.getOrCreateSession("s1", "scoped");
+
+    m.recordToolSuccess("s1", 10, "out", "c1", "lsp");
+    let s = m.getSession("s1")!;
+    assert.equal(s.toolCallsSucceeded, 1);
+    assert.equal(s.toolCount, 0);
+
+    m.recordToolSuccess("s1", 10, "out", "c2", "read", { filePath: ".cheatsheet.md" });
+    s = m.getSession("s1")!;
+    assert.equal(s.toolCallsSucceeded, 2);
+    assert.equal(s.toolCount, 0);
+
+    m.recordToolSuccess("s1", 10, "out", "c3", "write", { path: ".cheatsheet.md" });
+    s = m.getSession("s1")!;
+    assert.equal(s.toolCallsSucceeded, 3);
+    assert.equal(s.toolCount, 0);
+
+    m.recordToolSuccess("s1", 10, "out", "c4", "read", { filePath: "src/index.ts" });
+    s = m.getSession("s1")!;
+    assert.equal(s.toolCallsSucceeded, 4);
+    assert.equal(s.toolCount, 1);
+
+    m.recordToolSuccess("s1", 10, "out", "c5", "read", {});
+    s = m.getSession("s1")!;
+    assert.equal(s.toolCallsSucceeded, 5);
+    assert.equal(s.toolCount, 2);
+
+    m.recordToolSuccess("s1", 10, "out", "c6", "glob", { pattern: "**/*" });
+    s = m.getSession("s1")!;
+    assert.equal(s.toolCallsSucceeded, 6);
+    assert.equal(s.toolCount, 3);
+  });
+
+  test("execution-stage accounting whitelists absolute runtime paths inside the workspace", () => {
+    const m = new SessionStateManager(
+      makeConfig({ agents: { scoped: { whitelistedTools: [{ name: "read", allowedPaths: [".agent.md"] }] } } }),
+      "/workspace/project",
+    );
+    m.getOrCreateSession("s1", "scoped");
+    m.recordToolSuccess("s1", 0, "", "c1", "read", { filePath: "/workspace/project/.agent.md" });
+    assert.equal(m.getSession("s1")!.toolCount, 0);
+  });
+
+  test("baked file-explorer end-to-end: free operations in execution, scoped finalization enforcement after exhaustion", async () => {
+    const hooks = await server({} as unknown as PluginInput, makeConfig({}) as unknown as PluginOptions);
+    await callHook(hooks["chat.params"], { sessionID: "sFE", agent: "file-explorer" });
+
+    await callHook(hooks["tool.execute.before"], { sessionID: "sFE", tool: "lsp" }, { args: { filePath: "src/a.ts" } });
+    await callHook(hooks["tool.execute.after"], { sessionID: "sFE", tool: "lsp" }, { output: "syms", args: { filePath: "src/a.ts" } });
+
+    await callHook(hooks["tool.execute.before"], { sessionID: "sFE", tool: "read" }, { args: { filePath: ".agent_file_explorer.md" } });
+    await callHook(hooks["tool.execute.after"], { sessionID: "sFE", tool: "read" }, { output: "notes", args: { filePath: ".agent_file_explorer.md" } });
+    await callHook(hooks["tool.execute.before"], { sessionID: "sFE", tool: "write" }, { args: { path: ".agent_file_explorer.md" } });
+    await callHook(hooks["tool.execute.after"], { sessionID: "sFE", tool: "write" }, { output: "ok", args: { path: ".agent_file_explorer.md" } });
+
+    for (let i = 0; i < 3; i++) {
+      await callHook(hooks["tool.execute.before"], { sessionID: "sFE", tool: "glob" }, { args: { pattern: "*.ts" } });
+      await callHook(hooks["tool.execute.after"], { sessionID: "sFE", tool: "glob" }, { output: "files", args: { pattern: "*.ts" } });
+    }
+
+    await callHook(hooks["tool.execute.before"], { sessionID: "sFE", tool: "read" }, { args: { filePath: ".agent_file_explorer.md" } });
+    await callHook(hooks["tool.execute.after"], { sessionID: "sFE", tool: "read" }, { output: "content", args: { filePath: ".agent_file_explorer.md" } });
+
+    await callHook(hooks["tool.execute.before"], { sessionID: "sFE", tool: "write" }, { args: { path: ".agent_file_explorer.md" } });
+    await callHook(hooks["tool.execute.after"], { sessionID: "sFE", tool: "write" }, { output: "ok", args: { path: ".agent_file_explorer.md" } });
+
+    await assert.rejects(
+      callHook(hooks["tool.execute.before"], { sessionID: "sFE", tool: "read" }, { args: { filePath: "src/index.ts" } }),
+      CapacityLimitError,
+    );
+    await assert.rejects(
+      callHook(hooks["tool.execute.before"], { sessionID: "sFE", tool: "write" }, { args: { filePath: "src/index.ts" } }),
+      CapacityLimitError,
+    );
+
+    await assert.rejects(
+      callHook(hooks["tool.execute.before"], { sessionID: "sFE", tool: "lsp" }, { args: {} }),
+      CapacityLimitError,
+    );
+    await assert.rejects(
+      callHook(hooks["tool.execute.before"], { sessionID: "sFE", tool: "glob" }, { args: {} }),
+      CapacityLimitError,
+    );
+    await assert.rejects(
+      callHook(hooks["tool.execute.before"], { sessionID: "sFE", tool: "bash" }, { args: {} }),
       CapacityLimitError,
     );
   });

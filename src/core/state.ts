@@ -7,6 +7,7 @@ import type {
   ResolvedContextGuardConfig,
   SessionGuardState,
   SessionStage,
+  WhitelistedToolEntry,
 } from "../types.ts";
 import { estimateTokens, extractOutputText } from "./estimator.ts";
 
@@ -67,11 +68,15 @@ export class CapacityLimitError extends Error {
   }
 }
 
-function normalizePath(input: string): string {
-  let normalized = path.posix.normalize(input.replace(/\\/g, "/"));
-  if (normalized === ".") return "";
-  if (normalized.length > 1 && normalized.endsWith("/")) normalized = normalized.slice(0, -1);
-  return normalized;
+function normalizePath(input: string, workspaceRoot?: string): string {
+  if (!input || input.length === 0) return "";
+  const normalized = input.replace(/\\/g, "/");
+  let resolved = workspaceRoot
+    ? path.resolve(workspaceRoot, normalized).replace(/\\/g, "/")
+    : path.posix.normalize(normalized);
+  if (resolved === ".") return "";
+  if (resolved.length > 1 && resolved.endsWith("/")) resolved = resolved.slice(0, -1);
+  return resolved;
 }
 
 function escapeRegExpChar(ch: string): string {
@@ -98,20 +103,25 @@ function globPatternToRegExp(pattern: string): RegExp {
   return new RegExp(`^${source}$`);
 }
 
-export function pathMatchesPattern(candidate: string, pattern: string): boolean {
-  const path = normalizePath(candidate);
-  const normalizedPattern = normalizePath(pattern);
+export function pathMatchesPattern(
+  candidate: string,
+  pattern: string,
+  workspaceRoot?: string,
+): boolean {
+  if (!pattern || pattern.length === 0) return false;
+  const targetPath = normalizePath(candidate, workspaceRoot);
+  const normalizedPattern = normalizePath(pattern, workspaceRoot);
   if (normalizedPattern.length === 0) return false;
 
-  if (globPatternToRegExp(normalizedPattern).test(path)) return true;
+  if (globPatternToRegExp(normalizedPattern).test(targetPath)) return true;
 
   if (normalizedPattern.endsWith("/**")) {
     const base = normalizedPattern.slice(0, -3);
-    return path === base || path.startsWith(base + "/");
+    return targetPath === base || targetPath.startsWith(base + "/");
   }
 
   if (!/[?*]/.test(normalizedPattern)) {
-    return path === normalizedPattern || path.startsWith(normalizedPattern + "/");
+    return targetPath === normalizedPattern || targetPath.startsWith(normalizedPattern + "/");
   }
 
   return false;
@@ -123,15 +133,32 @@ export function pathMatchesPattern(candidate: string, pattern: string): boolean 
  * Always whitelisted regardless of configuration: any tool whose name starts
  * with "todo" and the exact tool "skill". Configured patterns match exact tool
  * names, or as prefixes when the pattern ends with a trailing "*"
- * (e.g. "context7*" matches "context7-docs"). Only a trailing star means
- * prefix; no other glob syntax is supported.
+ * (e.g. "context7*" matches "context7-docs"). Structured entries may specify
+ * allowedPaths for wildcard path scoping; string entries or structured entries
+ * omitting allowedPaths are unrestricted ("*").
  */
-export function matchesWhitelist(toolName: string, patterns?: string[]): boolean {
+export function matchesWhitelist(
+  toolName: string,
+  patterns?: WhitelistedToolEntry[],
+  args?: Record<string, unknown>,
+  workspaceRoot?: string,
+): boolean {
   if (toolName.startsWith("todo") || toolName === "skill") return true;
-  if (!patterns) return false;
-  return patterns.some((pattern) => {
-    if (pattern.endsWith("*")) return toolName.startsWith(pattern.slice(0, -1));
-    return toolName === pattern;
+  if (!patterns || patterns.length === 0) return false;
+  const targetPath = args !== undefined ? extractTargetPath(args) : undefined;
+  return patterns.some((entry) => {
+    const name = typeof entry === "string" ? entry : entry.name;
+    const nameMatches = name.endsWith("*")
+      ? toolName.startsWith(name.slice(0, -1))
+      : toolName === name;
+    if (!nameMatches) return false;
+    if (typeof entry === "string" || entry.allowedPaths === undefined) {
+      return true;
+    }
+    if (targetPath === undefined) return false;
+    return entry.allowedPaths.some((pattern) =>
+      pathMatchesPattern(targetPath, pattern, workspaceRoot),
+    );
   });
 }
 
@@ -233,9 +260,11 @@ export class SessionStateManager {
   private attemptedCallIDs = new Map<string, BoundedCallIDCache>();
   private succeededCallIDs = new Map<string, BoundedCallIDCache>();
   private config: ResolvedContextGuardConfig;
+  private workspaceRoot: string;
 
-  constructor(config: ResolvedContextGuardConfig = DEFAULT_CONFIG) {
+  constructor(config: ResolvedContextGuardConfig = DEFAULT_CONFIG, workspaceRoot = process.cwd()) {
     this.config = config;
+    this.workspaceRoot = normalizePath(workspaceRoot);
   }
 
   private configForSession(sessionID: string): ResolvedContextGuardConfig {
@@ -365,7 +394,8 @@ export class SessionStateManager {
       this.configForSession(sessionID),
     );
     const whitelisted =
-      toolName !== undefined && matchesWhitelist(toolName, effectiveProfile.whitelistedTools);
+      toolName !== undefined &&
+      matchesWhitelist(toolName, effectiveProfile.whitelistedTools, args, this.workspaceRoot);
     // Calls that began in finalization (before this success could trigger the
     // phase transition) consume a finalization slot — including whitelisted
     // tools; the whitelist only exempts toolCount. Gated on a configured cap
@@ -515,7 +545,9 @@ export class SessionStateManager {
     const allowedPaths = policy.allowedPaths;
     if (targetPath === undefined || !allowedPaths || allowedPaths.length === 0) return true;
 
-    return allowedPaths.some((pattern) => pathMatchesPattern(targetPath, pattern));
+    return allowedPaths.some((pattern) =>
+      pathMatchesPattern(targetPath, pattern, this.workspaceRoot),
+    );
   }
 
   assertOperationPermitted(

@@ -23,6 +23,13 @@ export interface ContextGuardOptions {
   agents?: Record<string, AgentCapacityProfile>;
 }
 
+export type WhitelistedToolEntry =
+  | string
+  | {
+      name: string;
+      allowedPaths?: string[];
+    };
+
 export interface ResolvedAgentCapacityProfile {
   enabled: boolean;
   enabledExplicit: boolean;
@@ -30,7 +37,7 @@ export interface ResolvedAgentCapacityProfile {
   maxTokens: number;
   finalization: FinalizationPolicy;
   /** Tool names that do not count against the tool budget; undefined when unset. */
-  whitelistedTools?: string[];
+  whitelistedTools?: WhitelistedToolEntry[];
   /** Remaining finalization calls; 0/undefined means unset (positive-integer convention). */
   finalizationRemaining?: number;
 }
@@ -87,7 +94,7 @@ export interface AgentCapacityProfile {
   maxTools?: number;
   maxTokens?: number;
   finalization?: Partial<FinalizationPolicy>;
-  whitelistedTools?: string[];
+  whitelistedTools?: WhitelistedToolEntry[];
   finalizationRemaining?: number;
 }
 
