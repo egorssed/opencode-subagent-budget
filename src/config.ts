@@ -13,7 +13,6 @@ import type {
 // per-agent options are provided; explicit tuple options still win per-field.
 export const REFERENCE_AGENT_BUDGETS: Record<string, AgentCapacityProfile> = {
   "web-researcher": { maxTools: 9, maxTokens: 24000 },
-  "unbiased-collector": { maxTools: 14, maxTokens: 48000 },
   "file-explorer": {
     maxTools: 15,
     maxTokens: 50000,
@@ -28,19 +27,21 @@ export const REFERENCE_AGENT_BUDGETS: Record<string, AgentCapacityProfile> = {
       allowedPaths: [".agent_file_explorer.md"],
     },
   },
-  "hoare-spec-formalizer": { maxTools: 4, maxTokens: 10000 },
-  "hoare-checks": { maxTools: 10, maxTokens: 18000 },
-  "hoare-planner": { maxTools: 4, maxTokens: 12000 },
-  "hoare-plan-verifier": { maxTools: 5, maxTokens: 12000 },
-  "hoare-impl-verifier": { maxTools: 12, maxTokens: 24000 },
   "code-reviewer": { maxTools: 12, maxTokens: 18000, whitelistedTools: ["lsp"] },
   "security-reviewer": { maxTools: 14, maxTokens: 24000, whitelistedTools: ["lsp"] },
   planner: {
     maxTools: 15,
     maxTokens: 18000,
-    finalizationRemaining: 2,
-    finalization: { allowedTools: ["write", "edit", "apply_patch"] },
-    whitelistedTools: ["lsp"],
+    finalization: {
+      allowedTools: ["read", "write", "edit"],
+      allowedPaths: [".agent_file_explorer.md","docs/*.md"],
+    },
+    whitelistedTools: ["lsp", 'task',
+      { name: "read", allowedPaths: [".agent_planner.md","docs/*.md"] },
+      { name: "write", allowedPaths: [".agent_planner.md","docs/*.md"] },
+      { name: "edit", allowedPaths: [".agent_planner.md","docs/*.md"] },
+      { name: "apply_patch", allowedPaths: [".agent_planner.md","docs/*.md"] }
+  ],
   },
   "doc-writer": {
     maxTools: 10,
@@ -54,9 +55,12 @@ export const REFERENCE_AGENT_BUDGETS: Record<string, AgentCapacityProfile> = {
     maxTokens: 48000,
     finalizationRemaining: 3,
     finalization: { allowedTools: ["write", "edit", "apply_patch"] },
-    whitelistedTools: ["context7*", "task", "lsp"],
-  },
-  "test-builder": { maxTools: 1, maxTokens: 4000 },
+    whitelistedTools: ["context7*", "task", "lsp",
+      { name: "read", allowedPaths: [".agent_coder.md","docs/*.md"] },
+      { name: "write", allowedPaths: [".agent_coder.md","docs/*.md"] },
+      { name: "edit", allowedPaths: [".agent_coder.md","docs/*.md"] },
+      { name: "apply_patch", allowedPaths: [".agent_coder.md","docs/*.md"] }],
+  }
 };
 
 const DEFAULT_DEFAULTS: ResolvedContextGuardConfig["defaults"] = {
