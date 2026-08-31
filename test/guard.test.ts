@@ -16,14 +16,10 @@ import {
   formatCapacityBreachMessage,
   matchesWhitelist,
   pathMatchesPattern,
-  toolMatchesPattern,
   SessionStateManager,
+  toolMatchesPattern,
 } from "../src/core/state.ts";
-import type {
-  ContextGuardOptions,
-  ResolvedContextGuardConfig,
-  WhitelistedToolEntry,
-} from "../src/types.ts";
+import type { ContextGuardOptions, ResolvedContextGuardConfig } from "../src/types.ts";
 import { server } from "../src/index.ts";
 
 const ENV_KEYS = [
@@ -52,6 +48,10 @@ function makeConfig(options: ContextGuardOptions): ResolvedContextGuardConfig {
   return resolveConfig(options as unknown as PluginOptions);
 }
 
+/** Advice suffix write-capable profiles' finalization rejections/statuses gain while the hatch is available. */
+const ADVICE_PREFIX =
+  " If you have the write tool and the task remains unfinished, you may preserve the critical context so another agent can complete it efficiently. To do that, write the handover to ";
+
 async function callHook(
   hook: unknown,
   input: Record<string, unknown>,
@@ -63,39 +63,114 @@ async function callHook(
   );
 }
 
-describe("agent budget resolution and overrides", () => {
-  test("explicit agent override wins per-field over base budget", () => {
-    const config = makeConfig({ agents: { custom: { maxTools: 5, maxTokens: 10000, finalizationRemaining: 3 } } });
-    assert.equal(config.agents.custom.maxTools, 5);
-    assert.equal(config.agents.custom.maxTokens, 10000);
-    assert.equal(config.agents.custom.finalizationRemaining, 3);
+describe("baked-in reference agent budgets", () => {
+  test("no options yields baked budgets for known agents", () => {
+    const config = resolveConfig();
+    assert.deepEqual(config.agents.coder, {
+      enabled: true,
+      enabledExplicit: false,
+      maxTools: 24,
+      maxTokens: 48000,
+      finalization: { allowedTools: ["write", "edit", "apply_patch"], allowedPaths: [] },
+      whitelistedTools: ["context7*", "task", "lsp"],
+      finalizationRemaining: 3,
+    });
+    assert.deepEqual(config.agents.planner, {
+      enabled: true,
+      enabledExplicit: false,
+      maxTools: 15,
+      maxTokens: 18000,
+      finalization: { allowedTools: ["write", "edit", "apply_patch"], allowedPaths: [] },
+      whitelistedTools: ["lsp"],
+      finalizationRemaining: 2,
+    });
+    assert.deepEqual(config.agents["test-builder"], {
+      enabled: true,
+      enabledExplicit: false,
+      maxTools: 1,
+      maxTokens: 4000,
+      finalization: { allowedTools: [], allowedPaths: [] },
+      whitelistedTools: undefined,
+      finalizationRemaining: undefined,
+    });
+    assert.deepEqual(config.agents["file-explorer"], {
+      enabled: true,
+      enabledExplicit: false,
+      maxTools: 15,
+      maxTokens: 50000,
+      finalization: { allowedTools: [], allowedPaths: [] },
+      whitelistedTools: ["lsp"],
+      finalizationRemaining: undefined,
+    });
   });
 
-  test("explicit whitelistedTools merges without touching finalizationRemaining", () => {
-    const config = makeConfig({ agents: { custom: { maxTools: 5, whitelistedTools: ["lsp"], finalizationRemaining: 3 } } });
-    assert.deepEqual(config.agents.custom.whitelistedTools, ["lsp"]);
-    assert.equal(config.agents.custom.finalizationRemaining, 3);
+  test("baked whitelistedTools and finalizationRemaining cover every scoped agent", () => {
+    const config = resolveConfig();
+    assert.deepEqual(config.agents["doc-writer"].whitelistedTools, ["lsp"]);
+    assert.equal(config.agents["doc-writer"].finalizationRemaining, 2);
+    assert.deepEqual(config.agents["code-reviewer"].whitelistedTools, ["lsp"]);
+    assert.equal(config.agents["code-reviewer"].finalizationRemaining, undefined);
+    assert.deepEqual(config.agents["security-reviewer"].whitelistedTools, ["lsp"]);
+    assert.equal(config.agents["security-reviewer"].finalizationRemaining, undefined);
+    for (const name of [
+      "web-researcher",
+      "unbiased-collector",
+      "hoare-spec-formalizer",
+      "hoare-checks",
+      "hoare-planner",
+      "hoare-plan-verifier",
+      "hoare-impl-verifier",
+      "test-builder",
+    ]) {
+      assert.equal(config.agents[name].whitelistedTools, undefined, name);
+      assert.equal(config.agents[name].finalizationRemaining, undefined, name);
+    }
+  });
+
+  test("explicit agent override wins per-field over baked budget", () => {
+    const config = makeConfig({ agents: { coder: { maxTools: 5 } } });
+    assert.equal(config.agents.coder.maxTools, 5);
+    assert.equal(config.agents.coder.maxTokens, 48000);
+    assert.deepEqual(config.agents.coder.finalization.allowedTools, [
+      "write",
+      "edit",
+      "apply_patch",
+    ]);
+    assert.deepEqual(config.agents.coder.whitelistedTools, ["context7*", "task", "lsp"]);
+    assert.equal(config.agents.coder.finalizationRemaining, 3);
+  });
+
+  test("explicit whitelistedTools replaces baked value without touching finalizationRemaining", () => {
+    const config = makeConfig({ agents: { coder: { whitelistedTools: ["lsp"] } } });
+    assert.deepEqual(config.agents.coder.whitelistedTools, ["lsp"]);
+    assert.equal(config.agents.coder.finalizationRemaining, 3);
+  });
+
+  test("explicit finalizationRemaining replaces baked value without touching whitelistedTools", () => {
+    const config = makeConfig({ agents: { planner: { finalizationRemaining: 1 } } });
+    assert.equal(config.agents.planner.finalizationRemaining, 1);
+    assert.deepEqual(config.agents.planner.whitelistedTools, ["lsp"]);
   });
 
   test("explicit finalizationRemaining 0 falls back to unset", () => {
-    const config = makeConfig({ agents: { custom: { finalizationRemaining: 0 } } });
-    assert.equal(config.agents.custom.finalizationRemaining, undefined);
+    const config = makeConfig({ agents: { coder: { finalizationRemaining: 0 } } });
+    assert.equal(config.agents.coder.finalizationRemaining, undefined);
   });
 
   test("resolved whitelistedTools is a copy, not the configured array", () => {
-    const entry = { name: "read", allowedPaths: [".cheatsheet.md"] };
-    const whitelistedTools = ["lsp", entry];
-    const config = makeConfig({ agents: { custom: { whitelistedTools } } });
-    assert.deepEqual(config.agents.custom.whitelistedTools, ["lsp", entry]);
-    assert.notEqual(config.agents.custom.whitelistedTools, whitelistedTools);
-    assert.notEqual(config.agents.custom.whitelistedTools![1], entry);
-    assert.notEqual(
-      (config.agents.custom.whitelistedTools![1] as { allowedPaths?: string[] }).allowedPaths,
-      entry.allowedPaths,
-    );
+    const whitelistedTools = ["lsp"];
+    const config = makeConfig({ agents: { coder: { whitelistedTools } } });
+    assert.deepEqual(config.agents.coder.whitelistedTools, ["lsp"]);
+    assert.notEqual(config.agents.coder.whitelistedTools, whitelistedTools);
   });
 
-  test("agent only present in options still resolves with defaults", () => {
+  test("other baked agents survive an explicit override for one agent", () => {
+    const config = makeConfig({ agents: { coder: { maxTools: 5 } } });
+    assert.equal(config.agents["file-explorer"].maxTools, 15);
+    assert.equal(config.agents["security-reviewer"].maxTokens, 24000);
+  });
+
+  test("agent only present in options still resolves", () => {
     const config = makeConfig({ agents: { explore: { maxTools: 3 } } });
     assert.equal(config.agents.explore.maxTools, 3);
     assert.equal(config.agents.explore.maxTokens, 40000);
@@ -336,6 +411,7 @@ describe("SessionStateManager lifecycle", () => {
     assert.equal(s.tokensOutput, 0);
     assert.equal(s.tokensIngested, 0);
     assert.equal(s.finalizationToolsUsed, 0);
+    assert.equal(s.isHandoverWritten, false);
     assert.equal(s.exhaustionReason, null);
     assert.equal(s.agentName, "explore");
     assert.equal(s.sessionID, "s1");
@@ -473,6 +549,24 @@ describe("SessionStateManager lifecycle", () => {
 });
 
 describe("finalization whitelist enforcement", () => {
+  test("allowedTools support glob wildcards", () => {
+    const manager = new SessionStateManager(
+      makeConfig({
+        agents: {
+          tester: {
+            maxTools: 1,
+            finalization: { allowedTools: ["write*"] },
+          },
+        },
+      }),
+    );
+    manager.getOrCreateSession("s1", "tester");
+    manager.transitionToFinalization("s1", "tool_limit");
+
+    assert.equal(manager.isOperationPermittedInFinalization("s1", "write_file"), true);
+    assert.equal(manager.isOperationPermittedInFinalization("s1", "read"), false);
+  });
+
   const writerConfig = (): ContextGuardOptions => ({
     defaults: { maxTools: 99, maxTokens: 99000, finalization: { allowedTools: [], allowedPaths: [] } },
     agents: {
@@ -558,21 +652,6 @@ describe("finalization whitelist enforcement", () => {
     assert.equal(m.isOperationPermittedInFinalization("s1", "write", { filePath: "/anywhere/x.md" }), true);
   });
 
-  test("finalization allowedTools supports wildcards", () => {
-    const m = new SessionStateManager(
-      makeConfig({
-        agents: {
-          w: { maxTools: 1, finalization: { allowedTools: ["todo*", "write_*"], allowedPaths: [] } },
-        },
-      }),
-    );
-    m.getOrCreateSession("s1", "w");
-    m.transitionToFinalization("s1", "manual");
-    assert.equal(m.isOperationPermittedInFinalization("s1", "todowrite", {}), true);
-    assert.equal(m.isOperationPermittedInFinalization("s1", "write_file", {}), true);
-    assert.equal(m.isOperationPermittedInFinalization("s1", "read", {}), false);
-  });
-
   test("assertOperationPermitted allows whitelisted operation", () => {
     const m = exhaustedWriter();
     assert.doesNotThrow(() =>
@@ -582,12 +661,15 @@ describe("finalization whitelist enforcement", () => {
 
   test("assertOperationPermitted throws with contract message and fields", () => {
     const m = exhaustedWriter();
-    const finalization = { allowedTools: ["write", "edit"], allowedPaths: ["./reports/**"] };
+    // The handover advice is only appended while the one-time escape hatch is
+    // still available; latch it so the legacy breach message keeps its exact
+    // contract form.
+    m.getSession("s1")!.isHandoverWritten = true;
     const expected = [
       '[Capacity Guard] Session limit reached for agent "@writer".',
       "Current stage: FINALIZATION",
       "Limit exceeded: tool_limit (Used: 2/2 tools, 0/99000 tokens).",
-      "Action required: Tool execution is restricted in finalization stage. Allowed tools: write, edit (allowed paths: ./reports/**). Summarize your findings and provide your report in your text response.",
+      "Action required: Tool execution is restricted in finalization stage. Please summarize your findings, provide your final report, or complete task handover in your text response.",
     ].join("\n");
 
     let caught: unknown;
@@ -606,7 +688,6 @@ describe("finalization whitelist enforcement", () => {
     assert.equal(error.maxTools, 2);
     assert.equal(error.tokensIngested, 0);
     assert.equal(error.maxTokens, 99000);
-    assert.deepEqual(error.finalization, finalization);
     assert.equal(
       formatCapacityBreachMessage({
         agentName: "writer",
@@ -615,7 +696,6 @@ describe("finalization whitelist enforcement", () => {
         maxTools: 2,
         tokensIngested: 0,
         maxTokens: 99000,
-        finalization,
       }),
       expected,
     );
@@ -632,30 +712,6 @@ describe("finalization whitelist enforcement", () => {
     assert.equal(pathMatchesPattern("reports/x.md", "./reports/*"), true);
     assert.equal(pathMatchesPattern("./src/a.ts", "./reports/**"), false);
     assert.equal(pathMatchesPattern("./x.md", ""), false);
-  });
-
-  test("pathMatchesPattern resolves relative paths against the workspace root", () => {
-    const workspaceRoot = "/workspace/project";
-    assert.equal(pathMatchesPattern("/workspace/project/.agent.md", ".agent.md", workspaceRoot), true);
-    assert.equal(pathMatchesPattern("/workspace/project/reports/a.md", "reports/**", workspaceRoot), true);
-    assert.equal(pathMatchesPattern("/outside/project/.agent.md", ".agent.md", workspaceRoot), false);
-    assert.equal(pathMatchesPattern("/outside/project/reports/a.md", "reports/**", workspaceRoot), false);
-    assert.equal(pathMatchesPattern("/outside/project/a.md", "/outside/project/**", workspaceRoot), true);
-    assert.equal(pathMatchesPattern("reports/a.md", "reports/**"), true);
-    assert.equal(pathMatchesPattern("C:\\workspace\\project\\reports\\a.md", "reports/**", "C:/workspace/project"), true);
-  });
-
-  test("finalization paths accept absolute runtime paths inside the workspace", () => {
-    const m = new SessionStateManager(makeConfig(writerConfig()), "/workspace/project");
-    m.getOrCreateSession("s1", "writer");
-    m.recordToolExecution("s1", "");
-    m.recordToolExecution("s1", "");
-    assert.equal(
-      m.isOperationPermittedInFinalization("s1", "write", {
-        filePath: "/workspace/project/reports/summary.md",
-      }),
-      true,
-    );
   });
 });
 
@@ -983,6 +1039,18 @@ describe("T008 attempted vs succeeded accounting", () => {
 });
 
 describe("whitelisted tool accounting", () => {
+  test("tool patterns support glob wildcards", () => {
+    assert.equal(toolMatchesPattern("todowrite", "todo*"), true);
+    assert.equal(toolMatchesPattern("todo1", "todo?"), true);
+    assert.equal(toolMatchesPattern("read", "todo*"), false);
+  });
+
+  test("path-restricted wildcard whitelist entries require a matching path", () => {
+    const entries = [{ name: "read*", allowedPaths: ["docs/**"] }];
+    assert.equal(matchesWhitelist("read", entries, { filePath: "docs/a.md" }), true);
+    assert.equal(matchesWhitelist("read", entries, { filePath: "package.json" }), false);
+  });
+
   test("matchesWhitelist: always-free todo prefix and exact skill", () => {
     assert.equal(matchesWhitelist("todo"), true);
     assert.equal(matchesWhitelist("todowrite"), true);
@@ -992,25 +1060,15 @@ describe("whitelisted tool accounting", () => {
     assert.equal(matchesWhitelist("mytodo"), false);
   });
 
-  test("toolMatchesPattern wildcard support", () => {
-    assert.equal(toolMatchesPattern("todo_write", "todo*"), true);
-    assert.equal(toolMatchesPattern("todowrite", "todo*"), true);
-    assert.equal(toolMatchesPattern("mytodo", "*todo*"), true);
-    assert.equal(toolMatchesPattern("tool_v1", "tool_?1"), true);
-    assert.equal(toolMatchesPattern("tool_v12", "tool_?1"), false);
-    assert.equal(toolMatchesPattern("exact", "exact"), true);
-    assert.equal(toolMatchesPattern("other", "exact"), false);
-  });
-
-  test("matchesWhitelist: exact and wildcard patterns", () => {
+  test("matchesWhitelist: exact and trailing-star prefix patterns", () => {
     assert.equal(matchesWhitelist("lsp", ["lsp"]), true);
     assert.equal(matchesWhitelist("lsp", ["context7*", "lsp"]), true);
     assert.equal(matchesWhitelist("context7-docs", ["context7*"]), true);
     assert.equal(matchesWhitelist("context7-docs", ["context7"]), false);
     assert.equal(matchesWhitelist("bash", ["context7*", "lsp"]), false);
     assert.equal(matchesWhitelist("anything", ["*"]), true);
+    // Only a trailing star means prefix; no other glob syntax is supported.
     assert.equal(matchesWhitelist("webfoo", ["web*"]), true);
-    assert.equal(matchesWhitelist("webfoox", ["web*x"]), true);
     assert.equal(matchesWhitelist("webxfoo", ["web*x"]), false);
     assert.equal(matchesWhitelist("lsp"), false);
   });
@@ -1136,205 +1194,12 @@ describe("whitelisted tool accounting", () => {
       CapacityLimitError,
     );
   });
-
-  test("matchesWhitelist: legacy strings and structured entries without allowedPaths remain unrestricted", () => {
-    assert.equal(matchesWhitelist("read", ["read"]), true);
-    assert.equal(matchesWhitelist("read", ["read"], {}), true);
-    assert.equal(matchesWhitelist("read", ["read"], { filePath: "src/index.ts" }), true);
-    assert.equal(matchesWhitelist("read", ["read"], { path: "README.md" }), true);
-
-    assert.equal(matchesWhitelist("read", [{ name: "read" }]), true);
-    assert.equal(matchesWhitelist("read", [{ name: "read" }], {}), true);
-    assert.equal(matchesWhitelist("read", [{ name: "read" }], { filePath: "src/index.ts" }), true);
-    assert.equal(matchesWhitelist("read", [{ name: "read" }], { path: "README.md" }), true);
-
-    assert.equal(matchesWhitelist("context7-docs", ["context7*"], { filePath: "any" }), true);
-    assert.equal(matchesWhitelist("context7-docs", [{ name: "context7*" }], { filePath: "any" }), true);
-  });
-
-  test("matchesWhitelist: path-scoped matching, wildcards, filePath precedence, and missing path handling", () => {
-    const cheatsheetRules: WhitelistedToolEntry[] = [
-      { name: "read", allowedPaths: [".cheatsheet.md"] },
-      { name: "write", allowedPaths: [".cheatsheet.md"] },
-    ];
-    assert.equal(matchesWhitelist("read", cheatsheetRules, { filePath: ".cheatsheet.md" }), true);
-    assert.equal(matchesWhitelist("read", cheatsheetRules, { path: ".cheatsheet.md" }), true);
-    assert.equal(matchesWhitelist("write", cheatsheetRules, { filePath: "./.cheatsheet.md" }), true);
-    assert.equal(matchesWhitelist("write", cheatsheetRules, { path: "./.cheatsheet.md" }), true);
-
-    assert.equal(matchesWhitelist("read", cheatsheetRules, { filePath: "other.md" }), false);
-    assert.equal(matchesWhitelist("read", cheatsheetRules, { path: "other.md" }), false);
-
-    assert.equal(matchesWhitelist("read", cheatsheetRules, {}), false);
-    assert.equal(matchesWhitelist("read", cheatsheetRules), false);
-    assert.equal(matchesWhitelist("read", cheatsheetRules, { filePath: "" }), false);
-    assert.equal(matchesWhitelist("read", cheatsheetRules, { other: "value" }), false);
-
-    const wildcardRules: WhitelistedToolEntry[] = [
-      { name: "read", allowedPaths: ["src/**", "*.ts"] },
-    ];
-    assert.equal(matchesWhitelist("read", wildcardRules, { filePath: "src/core/state.ts" }), true);
-    assert.equal(matchesWhitelist("read", wildcardRules, { filePath: "src/index.ts" }), true);
-    assert.equal(matchesWhitelist("read", wildcardRules, { filePath: "guard.ts" }), true);
-    assert.equal(matchesWhitelist("read", wildcardRules, { filePath: "guard.js" }), false);
-    assert.equal(matchesWhitelist("read", wildcardRules, { filePath: "docs/readme.md" }), false);
-
-    assert.equal(
-      matchesWhitelist("read", wildcardRules, { filePath: "src/core/state.ts", path: "docs/readme.md" }),
-      true,
-    );
-    assert.equal(
-      matchesWhitelist("read", wildcardRules, { filePath: "docs/readme.md", path: "src/core/state.ts" }),
-      false,
-    );
-  });
-
-  test("matchesWhitelist resolves absolute runtime paths against the workspace root", () => {
-    const rules: WhitelistedToolEntry[] = [{ name: "read", allowedPaths: [".agent.md", "src/**"] }];
-    assert.equal(matchesWhitelist("read", rules, { filePath: "/workspace/project/.agent.md" }, "/workspace/project"), true);
-    assert.equal(matchesWhitelist("read", rules, { filePath: "/workspace/project/src/core/state.ts" }, "/workspace/project"), true);
-    assert.equal(matchesWhitelist("read", rules, { filePath: "/outside/project/.agent.md" }, "/workspace/project"), false);
-    assert.equal(matchesWhitelist("read", rules, { filePath: ".agent.md" }), true);
-  });
-
-  test("execution-stage accounting: matching path-scoped calls do not increment toolCount, nonmatching/missing do", () => {
-    const m = new SessionStateManager(
-      makeConfig({
-        agents: {
-          scoped: {
-            maxTools: 10,
-            whitelistedTools: [
-              "lsp",
-              { name: "read", allowedPaths: [".cheatsheet.md"] },
-              { name: "write", allowedPaths: [".cheatsheet.md"] },
-            ],
-          },
-        },
-      }),
-    );
-    m.getOrCreateSession("s1", "scoped");
-
-    m.recordToolSuccess("s1", 10, "out", "c1", "lsp");
-    let s = m.getSession("s1")!;
-    assert.equal(s.toolCallsSucceeded, 1);
-    assert.equal(s.toolCount, 0);
-
-    m.recordToolSuccess("s1", 10, "out", "c2", "read", { filePath: ".cheatsheet.md" });
-    s = m.getSession("s1")!;
-    assert.equal(s.toolCallsSucceeded, 2);
-    assert.equal(s.toolCount, 0);
-
-    m.recordToolSuccess("s1", 10, "out", "c3", "write", { path: ".cheatsheet.md" });
-    s = m.getSession("s1")!;
-    assert.equal(s.toolCallsSucceeded, 3);
-    assert.equal(s.toolCount, 0);
-
-    m.recordToolSuccess("s1", 10, "out", "c4", "read", { filePath: "src/index.ts" });
-    s = m.getSession("s1")!;
-    assert.equal(s.toolCallsSucceeded, 4);
-    assert.equal(s.toolCount, 1);
-
-    m.recordToolSuccess("s1", 10, "out", "c5", "read", {});
-    s = m.getSession("s1")!;
-    assert.equal(s.toolCallsSucceeded, 5);
-    assert.equal(s.toolCount, 2);
-
-    m.recordToolSuccess("s1", 10, "out", "c6", "glob", { pattern: "**/*" });
-    s = m.getSession("s1")!;
-    assert.equal(s.toolCallsSucceeded, 6);
-    assert.equal(s.toolCount, 3);
-  });
-
-  test("execution-stage accounting whitelists absolute runtime paths inside the workspace", () => {
-    const m = new SessionStateManager(
-      makeConfig({ agents: { scoped: { whitelistedTools: [{ name: "read", allowedPaths: [".agent.md"] }] } } }),
-      "/workspace/project",
-    );
-    m.getOrCreateSession("s1", "scoped");
-    m.recordToolSuccess("s1", 0, "", "c1", "read", { filePath: "/workspace/project/.agent.md" });
-    assert.equal(m.getSession("s1")!.toolCount, 0);
-  });
-
-  test("scoped agent end-to-end: free operations in execution, scoped finalization enforcement after exhaustion", async () => {
-    const explorerConfig = {
-      agents: {
-        "custom-explorer": {
-          maxTools: 3,
-          maxTokens: 50000,
-          whitelistedTools: [
-            "lsp",
-            { name: "read", allowedPaths: [".agent_file_explorer.md"] },
-            { name: "write", allowedPaths: [".agent_file_explorer.md"] },
-            { name: "edit", allowedPaths: [".agent_file_explorer.md"] },
-          ],
-          finalization: {
-            allowedTools: ["read", "write", "edit"],
-            allowedPaths: [".agent_file_explorer.md"],
-          },
-        },
-      },
-    };
-    const hooks = await server({} as unknown as PluginInput, makeConfig(explorerConfig) as unknown as PluginOptions);
-    await callHook(hooks["chat.params"], { sessionID: "sFE", agent: "custom-explorer" });
-
-    await callHook(hooks["tool.execute.before"], { sessionID: "sFE", tool: "lsp" }, { args: { filePath: "src/a.ts" } });
-    await callHook(hooks["tool.execute.after"], { sessionID: "sFE", tool: "lsp" }, { output: "syms", args: { filePath: "src/a.ts" } });
-
-    await callHook(hooks["tool.execute.before"], { sessionID: "sFE", tool: "read" }, { args: { filePath: ".agent_file_explorer.md" } });
-    await callHook(hooks["tool.execute.after"], { sessionID: "sFE", tool: "read" }, { output: "notes", args: { filePath: ".agent_file_explorer.md" } });
-    await callHook(hooks["tool.execute.before"], { sessionID: "sFE", tool: "write" }, { args: { path: ".agent_file_explorer.md" } });
-    await callHook(hooks["tool.execute.after"], { sessionID: "sFE", tool: "write" }, { output: "ok", args: { path: ".agent_file_explorer.md" } });
-
-    for (let i = 0; i < 3; i++) {
-      await callHook(hooks["tool.execute.before"], { sessionID: "sFE", tool: "glob" }, { args: { pattern: "*.ts" } });
-      await callHook(hooks["tool.execute.after"], { sessionID: "sFE", tool: "glob" }, { output: "files", args: { pattern: "*.ts" } });
-    }
-
-    await callHook(hooks["tool.execute.before"], { sessionID: "sFE", tool: "read" }, { args: { filePath: ".agent_file_explorer.md" } });
-    await callHook(hooks["tool.execute.after"], { sessionID: "sFE", tool: "read" }, { output: "content", args: { filePath: ".agent_file_explorer.md" } });
-
-    await callHook(hooks["tool.execute.before"], { sessionID: "sFE", tool: "write" }, { args: { path: ".agent_file_explorer.md" } });
-    await callHook(hooks["tool.execute.after"], { sessionID: "sFE", tool: "write" }, { output: "ok", args: { path: ".agent_file_explorer.md" } });
-
-    await assert.rejects(
-      callHook(hooks["tool.execute.before"], { sessionID: "sFE", tool: "read" }, { args: { filePath: "src/index.ts" } }),
-      CapacityLimitError,
-    );
-    await assert.rejects(
-      callHook(hooks["tool.execute.before"], { sessionID: "sFE", tool: "write" }, { args: { filePath: "src/index.ts" } }),
-      CapacityLimitError,
-    );
-
-    await assert.rejects(
-      callHook(hooks["tool.execute.before"], { sessionID: "sFE", tool: "lsp" }, { args: {} }),
-      CapacityLimitError,
-    );
-    await assert.rejects(
-      callHook(hooks["tool.execute.before"], { sessionID: "sFE", tool: "glob" }, { args: {} }),
-      CapacityLimitError,
-    );
-    await assert.rejects(
-      callHook(hooks["tool.execute.before"], { sessionID: "sFE", tool: "bash" }, { args: {} }),
-      CapacityLimitError,
-    );
-  });
 });
 
 describe("bounded finalization (finalizationRemaining)", () => {
-  const boundedConfig = makeConfig({
-    agents: {
-      tester: {
-        maxTools: 15,
-        maxTokens: 18000,
-        finalizationRemaining: 2,
-        finalization: { allowedTools: ["write", "edit", "apply_patch"] },
-      },
-    },
-  });
-
-  test("bounded agent (R=2) transitions at 13 of 15 tools, not at maxTools", () => {
-    const m = new SessionStateManager(boundedConfig);
-    m.getOrCreateSession("s1", "tester");
+  test("planner (R=2) transitions at 13 of 15 tools, not at maxTools", () => {
+    const m = new SessionStateManager(makeConfig({}));
+    m.getOrCreateSession("s1", "planner");
     for (let i = 0; i < 12; i++) m.recordToolExecution("s1", "");
     assert.equal(m.getSession("s1")!.stage, "execution");
     m.recordToolExecution("s1", "");
@@ -1343,21 +1208,15 @@ describe("bounded finalization (finalizationRemaining)", () => {
     assert.equal(m.getSession("s1")!.finalizationToolsUsed, 0);
   });
 
-  test("bounded profiles transition at maxTools - R", () => {
-    const cfg = makeConfig({
-      agents: {
-        a1: { maxTools: 10, finalizationRemaining: 2 },
-        a2: { maxTools: 24, finalizationRemaining: 3 },
-      },
-    });
-    const m = new SessionStateManager(cfg);
-    m.getOrCreateSession("d1", "a1");
+  test("doc-writer (R=2) transitions at 8 of 10; coder (R=3) at 21 of 24", () => {
+    const m = new SessionStateManager(makeConfig({}));
+    m.getOrCreateSession("d1", "doc-writer");
     for (let i = 0; i < 7; i++) m.recordToolExecution("d1", "");
     assert.equal(m.getSession("d1")!.stage, "execution");
     m.recordToolExecution("d1", "");
     assert.equal(m.getSession("d1")!.stage, "finalization");
 
-    m.getOrCreateSession("c1", "a2");
+    m.getOrCreateSession("c1", "coder");
     for (let i = 0; i < 20; i++) m.recordToolExecution("c1", "");
     assert.equal(m.getSession("c1")!.stage, "execution");
     m.recordToolExecution("c1", "");
@@ -1365,8 +1224,9 @@ describe("bounded finalization (finalizationRemaining)", () => {
   });
 
   test("token exhaustion still transitions a configured profile", () => {
-    const m = new SessionStateManager(makeConfig({ agents: { tester: { maxTokens: 50, finalizationRemaining: 2 } } }));
-    m.getOrCreateSession("s1", "tester");
+    // Per-field merge keeps planner's baked R=2 and tool policy.
+    const m = new SessionStateManager(makeConfig({ agents: { planner: { maxTokens: 50 } } }));
+    m.getOrCreateSession("s1", "planner");
     m.recordTokens("s1", 50);
     const s = m.getSession("s1")!;
     assert.equal(s.stage, "finalization");
@@ -1375,8 +1235,8 @@ describe("bounded finalization (finalizationRemaining)", () => {
   });
 
   test("phase-entry call does not consume a finalization slot", () => {
-    const m = new SessionStateManager(boundedConfig);
-    m.getOrCreateSession("s1", "tester");
+    const m = new SessionStateManager(makeConfig({}));
+    m.getOrCreateSession("s1", "planner");
     for (let i = 0; i < 13; i++) m.recordToolExecution("s1", "");
     assert.equal(m.getSession("s1")!.stage, "finalization");
     // The 13th (entry-triggering) execution call left the allowance untouched.
@@ -1385,8 +1245,8 @@ describe("bounded finalization (finalizationRemaining)", () => {
   });
 
   test("finalization permits allowed policy calls and blocks others with remaining-count text", () => {
-    const m = new SessionStateManager(boundedConfig);
-    m.getOrCreateSession("s1", "tester");
+    const m = new SessionStateManager(makeConfig({}));
+    m.getOrCreateSession("s1", "planner");
     m.transitionToFinalization("s1", "tool_limit");
     assert.equal(m.isOperationPermittedInFinalization("s1", "write", {}), true);
     assert.equal(m.isOperationPermittedInFinalization("s1", "edit", {}), true);
@@ -1401,13 +1261,14 @@ describe("bounded finalization (finalizationRemaining)", () => {
     assert.ok(caught instanceof CapacityLimitError);
     assert.equal(
       (caught as CapacityLimitError).message,
-      "Finalization: 2 call(s) remaining. Only write, edit, apply_patch allowed.",
+      "Finalization: 2 call(s) remaining. Only write, edit, apply_patch allowed." +
+        `${ADVICE_PREFIX}Handovers/SCRATCH_planner_s1.md`,
     );
   });
 
   test("successful finalization calls consume slots; blocked and attempted-only calls do not", () => {
-    const m = new SessionStateManager(boundedConfig);
-    m.getOrCreateSession("s1", "tester");
+    const m = new SessionStateManager(makeConfig({}));
+    m.getOrCreateSession("s1", "planner");
     m.transitionToFinalization("s1", "tool_limit");
     m.recordToolAttempt("s1");
     assert.equal(m.getSession("s1")!.finalizationToolsUsed, 0);
@@ -1434,8 +1295,8 @@ describe("bounded finalization (finalizationRemaining)", () => {
   });
 
   test("duplicate after-hook delivery is idempotent for finalization accounting", () => {
-    const m = new SessionStateManager(boundedConfig);
-    m.getOrCreateSession("s1", "tester");
+    const m = new SessionStateManager(makeConfig({}));
+    m.getOrCreateSession("s1", "planner");
     m.transitionToFinalization("s1", "tool_limit");
     m.recordToolSuccess("s1", 0, "", "c1", "write");
     m.recordToolSuccess("s1", 0, "", "c1", "write");
@@ -1468,8 +1329,8 @@ describe("bounded finalization (finalizationRemaining)", () => {
   });
 
   test("getRemainingBudget surfaces finalization values without changing legacy fields", () => {
-    const m = new SessionStateManager(boundedConfig);
-    m.getOrCreateSession("s1", "tester");
+    const m = new SessionStateManager(makeConfig({}));
+    m.getOrCreateSession("s1", "planner");
     m.recordToolExecution("s1", "");
     const execution = m.getRemainingBudget("s1")!;
     assert.equal(execution.finalizationRemaining, 2);
@@ -1484,8 +1345,8 @@ describe("bounded finalization (finalizationRemaining)", () => {
   });
 
   test("hook plumbing: entry notice, remaining-count block, LAST CALL, and exhausted block", async () => {
-    const hooks = await server({} as unknown as PluginInput, boundedConfig as unknown as PluginOptions);
-    await callHook(hooks["chat.params"], { sessionID: "sP", agent: "tester" });
+    const hooks = await server({} as unknown as PluginInput, makeConfig({}) as unknown as PluginOptions);
+    await callHook(hooks["chat.params"], { sessionID: "sP", agent: "planner" });
     for (let i = 0; i < 13; i++) {
       await callHook(hooks["tool.execute.before"], { sessionID: "sP", tool: "grep" }, { args: {} });
       await callHook(hooks["tool.execute.after"], { sessionID: "sP", tool: "grep" }, { output: "" });
@@ -1499,7 +1360,7 @@ describe("bounded finalization (finalizationRemaining)", () => {
     assert.equal(system.length, 1);
     assert.equal(
       system[0],
-      "[capacity-guard] tools: 13/15 (2 remaining); tokens: 0/18000 (~18000 remaining); stage: finalization; finalization: 0/2 used ⚠️ FORCEFUL WRAP-UP: You have exactly 2 finalization call(s) remaining. Stop exploring and start producing your deliverable immediately.",
+      "[capacity-guard] tools: 13/15 (2 remaining); tokens: 0/18000 (~18000 remaining); stage: finalization; finalization: 0/2 used ⚠️ FORCEFUL WRAP-UP: You have exactly 2 finalization call(s) remaining. Stop exploring and start producing your deliverable immediately. If you have the write tool and the task remains unfinished, you may preserve the critical context so another agent can complete it efficiently. To do that, write the handover to Handovers/SCRATCH_planner_sP.md",
     );
 
     // Non-allowed tool blocked with remaining-count message before the cap.
@@ -1508,7 +1369,8 @@ describe("bounded finalization (finalizationRemaining)", () => {
       (err: unknown) =>
         err instanceof CapacityLimitError &&
         err.message ===
-          "Finalization: 2 call(s) remaining. Only write, edit, apply_patch allowed.",
+          "Finalization: 2 call(s) remaining. Only write, edit, apply_patch allowed." +
+            `${ADVICE_PREFIX}Handovers/SCRATCH_planner_sP.md`,
     );
 
     // First allowed finalization call: LAST CALL notice with one slot left.
@@ -1522,7 +1384,7 @@ describe("bounded finalization (finalizationRemaining)", () => {
     );
     assert.equal(
       lastCall[0],
-      "[capacity-guard] tools: 14/15 (1 remaining); tokens: 0/18000 (~18000 remaining); stage: finalization; finalization: 1/2 used 🚨 LAST CALL: This is your FINAL tool call. You must produce your deliverable NOW.",
+      "[capacity-guard] tools: 14/15 (1 remaining); tokens: 0/18000 (~18000 remaining); stage: finalization; finalization: 1/2 used 🚨 LAST CALL: This is your FINAL tool call. You must produce your deliverable NOW. If you have the write tool and the task remains unfinished, you may preserve the critical context so another agent can complete it efficiently. To do that, write the handover to Handovers/SCRATCH_planner_sP.md",
     );
 
     // Second and final allowed call consumes the last slot.
@@ -1540,7 +1402,8 @@ describe("bounded finalization (finalizationRemaining)", () => {
       (err: unknown) => err instanceof CapacityLimitError && err.message.includes("exhausted"),
     );
 
-    // Exhausted status: no wrap-up notice fires.
+    // Exhausted status: no wrap-up notice fires, but the handover advice is
+    // still advertised while the hatch remains available.
     const exhaustedStatus: string[] = [];
     await callHook(
       hooks["experimental.chat.system.transform"],
@@ -1549,7 +1412,8 @@ describe("bounded finalization (finalizationRemaining)", () => {
     );
     assert.equal(
       exhaustedStatus[0],
-      "[capacity-guard] tools: 15/15 (0 remaining); tokens: 0/18000 (~18000 remaining); stage: finalization; finalization: 2/2 used",
+      "[capacity-guard] tools: 15/15 (0 remaining); tokens: 0/18000 (~18000 remaining); stage: finalization; finalization: 2/2 used" +
+        `${ADVICE_PREFIX}Handovers/SCRATCH_planner_sP.md`,
     );
   });
 
@@ -1608,8 +1472,8 @@ describe("bounded finalization (finalizationRemaining)", () => {
   });
 
   test("configured execution-stage status line stays unchanged before finalization", async () => {
-    const hooks = await server({} as unknown as PluginInput, boundedConfig as unknown as PluginOptions);
-    await callHook(hooks["chat.params"], { sessionID: "sC", agent: "tester" });
+    const hooks = await server({} as unknown as PluginInput, makeConfig({}) as unknown as PluginOptions);
+    await callHook(hooks["chat.params"], { sessionID: "sC", agent: "planner" });
     await callHook(hooks["tool.execute.before"], { sessionID: "sC", tool: "grep" }, { args: {} });
     await callHook(hooks["tool.execute.after"], { sessionID: "sC", tool: "grep" }, { output: "" });
     const system: string[] = [];
@@ -1688,6 +1552,386 @@ describe("bounded finalization (finalizationRemaining)", () => {
     const s = m.getOrCreateSession("s1", "boss");
     assert.equal(s.stage, "execution");
     assert.equal(s.exhaustionReason, null);
+  });
+});
+
+describe("handover escape hatch (one-time scratch handover)", () => {
+  const handoverPath = (sessionID: string, agentName = "planner") =>
+    `Handovers/SCRATCH_${agentName}_${sessionID}.md`;
+
+  /** Planner in finalization with both configured slots already consumed. */
+  function exhaustedManager(agentName = "planner"): SessionStateManager {
+    const m = new SessionStateManager(makeConfig({}));
+    m.getOrCreateSession("s1", agentName);
+    m.transitionToFinalization("s1", "tool_limit");
+    m.recordToolSuccess("s1", 0, "", "o1", "write");
+    m.recordToolSuccess("s1", 0, "", "o2", "edit");
+    return m;
+  }
+
+  test("each write-family tool bypasses exhausted finalization for the designated handover path", () => {
+    for (const tool of ["write", "edit", "apply_patch"]) {
+      const m = exhaustedManager();
+      assert.equal(
+        m.isOperationPermittedInFinalization("s1", tool, { filePath: handoverPath("s1") }),
+        true,
+      );
+      assert.doesNotThrow(() =>
+        m.assertOperationPermitted("s1", tool, { filePath: handoverPath("s1") }),
+      );
+    }
+  });
+
+  test("recognizes exact and slash-suffix paths via filePath or path, with separators normalized", () => {
+    const m = exhaustedManager();
+    assert.equal(
+      m.isOperationPermittedInFinalization("s1", "write", { filePath: handoverPath("s1") }),
+      true,
+    );
+    assert.equal(
+      m.isOperationPermittedInFinalization("s1", "write", {
+        filePath: `/repo/${handoverPath("s1")}`,
+      }),
+      true,
+    );
+    assert.equal(
+      m.isOperationPermittedInFinalization("s1", "write", {
+        filePath: `C:\\repo\\${handoverPath("s1").split("/").join("\\")}`,
+      }),
+      true,
+    );
+    assert.equal(
+      m.isOperationPermittedInFinalization("s1", "write", { path: handoverPath("s1") }),
+      true,
+    );
+    // Near-suffix without a slash boundary never matches.
+    assert.equal(
+      m.isOperationPermittedInFinalization("s1", "write", { filePath: `X${handoverPath("s1")}` }),
+      false,
+    );
+    // A different agent's or session's handover file never matches.
+    assert.equal(
+      m.isOperationPermittedInFinalization("s1", "write", {
+        filePath: handoverPath("s1", "coder"),
+      }),
+      false,
+    );
+    assert.equal(
+      m.isOperationPermittedInFinalization("s1", "write", { filePath: "Handovers/other.md" }),
+      false,
+    );
+  });
+
+  test("wrong tool or wrong path never triggers the escape hatch", () => {
+    const m = exhaustedManager();
+    assert.equal(
+      m.isOperationPermittedInFinalization("s1", "read", { filePath: handoverPath("s1") }),
+      false,
+    );
+    assert.equal(
+      m.isOperationPermittedInFinalization("s1", "bash", { filePath: handoverPath("s1") }),
+      false,
+    );
+    assert.equal(
+      m.isOperationPermittedInFinalization("s1", "write", { filePath: "notes.md" }),
+      false,
+    );
+  });
+
+  test("allowed once: success flips the latch, skips the finalization slot, keeps ordinary accounting", () => {
+    const m = exhaustedManager();
+    m.recordToolSuccess("s1", 10, "handover body", "h1", "write", {
+      filePath: handoverPath("s1"),
+    });
+    const s = m.getSession("s1")!;
+    assert.equal(s.isHandoverWritten, true);
+    // The handover write did not consume a finalization slot.
+    assert.equal(s.finalizationToolsUsed, 2);
+    // Ordinary tool/success/token accounting is unchanged.
+    assert.equal(s.toolCount, 3);
+    assert.equal(s.toolCallsSucceeded, 3);
+    assert.ok(s.tokensIngested > 0);
+  });
+
+  test("further handover attempts block after the latch, even with finalization slots remaining", () => {
+    const m = new SessionStateManager(makeConfig({}));
+    m.getOrCreateSession("s1", "planner");
+    m.transitionToFinalization("s1", "tool_limit");
+    assert.equal(
+      m.isOperationPermittedInFinalization("s1", "write", { filePath: handoverPath("s1") }),
+      true,
+    );
+    m.recordToolSuccess("s1", 0, "", "h1", "write", { filePath: handoverPath("s1") });
+    assert.equal(
+      m.isOperationPermittedInFinalization("s1", "write", { filePath: handoverPath("s1") }),
+      false,
+    );
+    let caught: unknown;
+    try {
+      m.assertOperationPermitted("s1", "write", { filePath: handoverPath("s1") });
+    } catch (err) {
+      caught = err;
+    }
+    assert.ok(caught instanceof CapacityLimitError);
+    const message = (caught as CapacityLimitError).message;
+    assert.ok(message.includes("Finalization calls exhausted for this subagent."));
+    // No advice: the escape hatch has already been consumed.
+    assert.ok(!message.includes("If you have the write tool"));
+    // A post-latch remaining-count rejection (slots still open) also omits
+    // the advice.
+    let caughtRemaining: unknown;
+    try {
+      m.assertOperationPermitted("s1", "read", {});
+    } catch (err) {
+      caughtRemaining = err;
+    }
+    assert.ok(caughtRemaining instanceof CapacityLimitError);
+    assert.equal(
+      (caughtRemaining as CapacityLimitError).message,
+      "Finalization: 2 call(s) remaining. Only write, edit, apply_patch allowed.",
+    );
+  });
+
+  test("bounded remaining-count path-policy rejection advertises the handover advice while available", () => {
+    const m = new SessionStateManager(
+      makeConfig({
+        agents: {
+          pth: {
+            maxTools: 5,
+            maxTokens: 40000,
+            finalizationRemaining: 2,
+            finalization: { allowedTools: ["write"], allowedPaths: ["reports/**"] },
+          },
+        },
+      }),
+    );
+    m.getOrCreateSession("s1", "pth");
+    m.transitionToFinalization("s1", "tool_limit");
+    // An allowed tool targeting a disallowed path blocks with the
+    // remaining-count text plus the advice while the hatch is available.
+    let caught: unknown;
+    try {
+      m.assertOperationPermitted("s1", "write", { filePath: "elsewhere/notes.md" });
+    } catch (err) {
+      caught = err;
+    }
+    assert.ok(caught instanceof CapacityLimitError);
+    assert.equal(
+      (caught as CapacityLimitError).message,
+      "Finalization: 2 call(s) remaining. Only write allowed." +
+        `${ADVICE_PREFIX}Handovers/SCRATCH_pth_s1.md`,
+    );
+    // After the latch, the same rejection no longer advertises the path.
+    m.recordToolSuccess("s1", 0, "", "h1", "write", { filePath: handoverPath("s1", "pth") });
+    let caughtAfter: unknown;
+    try {
+      m.assertOperationPermitted("s1", "write", { filePath: "elsewhere/notes.md" });
+    } catch (err) {
+      caughtAfter = err;
+    }
+    assert.ok(caughtAfter instanceof CapacityLimitError);
+    assert.equal(
+      (caughtAfter as CapacityLimitError).message,
+      "Finalization: 2 call(s) remaining. Only write allowed.",
+    );
+  });
+
+  test("exhausted block message advertises the handover advice with the session-specific path", () => {
+    const m = exhaustedManager();
+    let caught: unknown;
+    try {
+      m.assertOperationPermitted("s1", "write", { filePath: "notes.md" });
+    } catch (err) {
+      caught = err;
+    }
+    assert.ok(caught instanceof CapacityLimitError);
+    assert.ok(
+      (caught as CapacityLimitError).message.endsWith(
+        `${ADVICE_PREFIX}${handoverPath("s1")}`,
+      ),
+    );
+  });
+
+  test("duplicate successful callID delivery stays idempotent for the handover latch", () => {
+    const m = exhaustedManager();
+    m.recordToolSuccess("s1", 0, "", "h1", "write", { filePath: handoverPath("s1") });
+    m.recordToolSuccess("s1", 0, "", "h1", "write", { filePath: handoverPath("s1") });
+    const s = m.getSession("s1")!;
+    assert.equal(s.isHandoverWritten, true);
+    assert.equal(s.toolCallsSucceeded, 3);
+    assert.equal(s.toolCount, 3);
+    assert.equal(s.finalizationToolsUsed, 2);
+  });
+
+  test("hook plumbing: status line advertises the path while available and stops after the handover", async () => {
+    const hooks = await server({} as unknown as PluginInput, makeConfig({}) as unknown as PluginOptions);
+    await callHook(hooks["chat.params"], { sessionID: "sH", agent: "planner" });
+    for (let i = 0; i < 13; i++) {
+      await callHook(hooks["tool.execute.before"], { sessionID: "sH", tool: "grep" }, { args: {} });
+      await callHook(hooks["tool.execute.after"], { sessionID: "sH", tool: "grep" }, { output: "" });
+    }
+    const system: string[] = [];
+    await callHook(
+      hooks["experimental.chat.system.transform"],
+      { sessionID: "sH", model: "m" },
+      { system },
+    );
+    assert.ok(system[0]!.endsWith(`${ADVICE_PREFIX}Handovers/SCRATCH_planner_sH.md`));
+
+    // The handover write passes the before-hook and its after-hook flips the
+    // latch without consuming a finalization slot.
+    const handoverArgs = { filePath: "Handovers/SCRATCH_planner_sH.md" };
+    await callHook(
+      hooks["tool.execute.before"],
+      { sessionID: "sH", tool: "write", callID: "h1" },
+      { args: handoverArgs },
+    );
+    await callHook(
+      hooks["tool.execute.after"],
+      { sessionID: "sH", tool: "write", callID: "h1", args: handoverArgs },
+      { output: "" },
+    );
+    const after: string[] = [];
+    await callHook(
+      hooks["experimental.chat.system.transform"],
+      { sessionID: "sH", model: "m" },
+      { system: after },
+    );
+    assert.ok(!after[0]!.includes("If you have the write tool"));
+    // The handover did not consume a finalization slot.
+    assert.ok(after[0]!.includes("finalization: 0/2 used"));
+    // A further handover write attempt is blocked even though slots remain.
+    await assert.rejects(
+      callHook(
+        hooks["tool.execute.before"],
+        { sessionID: "sH", tool: "write", callID: "h2" },
+        { args: handoverArgs },
+      ),
+      (err: unknown) =>
+        err instanceof CapacityLimitError &&
+        err.message.includes("Finalization calls exhausted for this subagent."),
+    );
+  });
+
+  test("legacy profile without a finalization cap advertises the handover until the latch, then stops", async () => {
+    const legacyConfig = {
+      defaults: { maxTools: 3, maxTokens: 99000, finalization: { allowedTools: ["read"] } },
+    };
+    const m = new SessionStateManager(makeConfig(legacyConfig));
+    m.getOrCreateSession("s1", "explore");
+    m.transitionToFinalization("s1", "tool_limit");
+    // The one-time handover write is still honored without a configured cap.
+    assert.equal(
+      m.isOperationPermittedInFinalization("s1", "write", {
+        filePath: handoverPath("s1", "explore"),
+      }),
+      true,
+    );
+    m.recordToolSuccess("s1", 0, "", "h1", "write", {
+      filePath: handoverPath("s1", "explore"),
+    });
+    assert.equal(m.getSession("s1")!.isHandoverWritten, true);
+    assert.equal(
+      m.isOperationPermittedInFinalization("s1", "write", {
+        filePath: handoverPath("s1", "explore"),
+      }),
+      false,
+    );
+    // Unbounded allowed calls remain. A post-latch policy violation keeps the
+    // legacy breach format and no longer advertises the consumed hatch.
+    let caught: unknown;
+    try {
+      m.assertOperationPermitted("s1", "write", {});
+    } catch (err) {
+      caught = err;
+    }
+    assert.ok(caught instanceof CapacityLimitError);
+    assert.ok(
+      (caught as CapacityLimitError).message.startsWith(
+        '[Capacity Guard] Session limit reached for agent "@explore".',
+      ),
+    );
+    assert.ok(
+      !(caught as CapacityLimitError).message.includes("If you have the write tool"),
+    );
+    // The status line advertises the path for the fresh uncapped session...
+    const hooks = await server({} as unknown as PluginInput, makeConfig(legacyConfig) as unknown as PluginOptions);
+    await callHook(hooks["chat.params"], { sessionID: "sL", agent: "explore" });
+    for (let i = 0; i < 3; i++) {
+      await callHook(hooks["tool.execute.before"], { sessionID: "sL", tool: "grep" }, { args: {} });
+      await callHook(hooks["tool.execute.after"], { sessionID: "sL", tool: "grep" }, { output: "" });
+    }
+    const system: string[] = [];
+    await callHook(
+      hooks["experimental.chat.system.transform"],
+      { sessionID: "sL", model: "m" },
+      { system },
+    );
+    assert.deepEqual(system, [
+      "[capacity-guard] tools: 3/3 (0 remaining); tokens: 0/99000 (~99000 remaining); stage: finalization",
+    ]);
+    // ...and stops advertising once the handover has been written.
+    const latchArgs = { filePath: handoverPath("sL", "explore") };
+    await callHook(
+      hooks["tool.execute.before"],
+      { sessionID: "sL", tool: "write", callID: "h1" },
+      { args: latchArgs },
+    );
+    await callHook(
+      hooks["tool.execute.after"],
+      { sessionID: "sL", tool: "write", callID: "h1", args: latchArgs },
+      { output: "" },
+    );
+    const after: string[] = [];
+    await callHook(
+      hooks["experimental.chat.system.transform"],
+      { sessionID: "sL", model: "m" },
+      { system: after },
+    );
+    assert.deepEqual(after, [
+      "[capacity-guard] tools: 4/3 (-1 remaining); tokens: 12/99000 (~98988 remaining); stage: finalization",
+    ]);
+  });
+
+  test("execution-stage designated write stays ordinary: no latch, hatch stays available for finalization", () => {
+    const m = new SessionStateManager(makeConfig({}));
+    m.getOrCreateSession("s1", "planner");
+    assert.equal(m.getSession("s1")!.stage, "execution");
+    // Pre-consume 12 ordinary tools so the designated write itself is the
+    // 13th success, which crosses the transition threshold (15 - 2).
+    for (let i = 0; i < 12; i++) {
+      m.recordToolSuccess("s1", 0, "", `o${i}`, "edit");
+    }
+    // A successful designated-path write while execution is active is an
+    // ordinary call: it keeps ordinary accounting, may itself trigger the
+    // phase transition, and must not flip the one-time latch.
+    m.recordToolSuccess("s1", 0, "", "h0", "write", { filePath: handoverPath("s1") });
+    let s = m.getSession("s1")!;
+    assert.equal(s.stage, "finalization");
+    assert.equal(s.isHandoverWritten, false);
+    assert.equal(s.toolCount, 13);
+    assert.equal(s.toolCallsSucceeded, 13);
+    assert.equal(s.finalizationToolsUsed, 0);
+    // Once in finalization, the hatch is still offered: the designated path
+    // remains permitted and the status surface still reports it as available.
+    assert.equal(
+      m.isOperationPermittedInFinalization("s1", "write", { filePath: handoverPath("s1") }),
+      true,
+    );
+    assert.equal(m.getRemainingBudget("s1")!.isHandoverWritten, false);
+    // A successful finalization-stage handover consumes the hatch exactly
+    // once without consuming a finalization slot.
+    m.recordToolSuccess("s1", 10, "handover body", "h1", "write", {
+      filePath: handoverPath("s1"),
+    });
+    s = m.getSession("s1")!;
+    assert.equal(s.isHandoverWritten, true);
+    assert.equal(s.finalizationToolsUsed, 0);
+    // Exactly once: a further designated attempt blocks.
+    assert.equal(
+      m.isOperationPermittedInFinalization("s1", "write", { filePath: handoverPath("s1") }),
+      false,
+    );
   });
 });
 

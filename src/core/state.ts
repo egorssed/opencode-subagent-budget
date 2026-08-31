@@ -3,7 +3,6 @@ import path from "node:path";
 import { DEFAULT_CONFIG } from "../config.ts";
 import type {
   ExhaustionReason,
-  FinalizationPolicy,
   ResolvedAgentCapacityProfile,
   ResolvedContextGuardConfig,
   SessionGuardState,
@@ -19,7 +18,6 @@ export interface CapacityLimitErrorInfo {
   maxTools: number;
   tokensIngested: number;
   maxTokens: number;
-  finalization?: FinalizationPolicy;
 }
 
 export interface SessionBudgetStatus {
@@ -35,24 +33,18 @@ export interface SessionBudgetStatus {
   exhaustionReason: ExhaustionReason | null;
   exempt: boolean;
   finalizationToolsUsed: number;
+  /** One-time scratch-handover latch: true once the designated handover write succeeded. */
+  isHandoverWritten: boolean;
   /** Bounded finalization call cap; undefined when the profile does not configure it. */
   finalizationRemaining?: number;
 }
 
 export function formatCapacityBreachMessage(info: CapacityLimitErrorInfo): string {
-  const tools =
-    info.finalization?.allowedTools && info.finalization.allowedTools.length > 0
-      ? info.finalization.allowedTools.join(", ")
-      : "none";
-  const paths =
-    info.finalization?.allowedPaths && info.finalization.allowedPaths.length > 0
-      ? ` (allowed paths: ${info.finalization.allowedPaths.join(", ")})`
-      : "";
   return [
     `[Capacity Guard] Session limit reached for agent "@${info.agentName}".`,
     "Current stage: FINALIZATION",
     `Limit exceeded: ${info.reason} (Used: ${info.toolCount}/${info.maxTools} tools, ${info.tokensIngested}/${info.maxTokens} tokens).`,
-    `Action required: Tool execution is restricted in finalization stage. Allowed tools: ${tools}${paths}. Summarize your findings and provide your report in your text response.`,
+    "Action required: Tool execution is restricted in finalization stage. Please summarize your findings, provide your final report, or complete task handover in your text response.",
   ].join("\n");
 }
 
@@ -63,7 +55,6 @@ export class CapacityLimitError extends Error {
   readonly maxTools: number;
   readonly tokensIngested: number;
   readonly maxTokens: number;
-  readonly finalization?: FinalizationPolicy;
 
   constructor(info: CapacityLimitErrorInfo, message?: string) {
     super(message ?? formatCapacityBreachMessage(info));
@@ -74,20 +65,19 @@ export class CapacityLimitError extends Error {
     this.maxTools = info.maxTools;
     this.tokensIngested = info.tokensIngested;
     this.maxTokens = info.maxTokens;
-    this.finalization = info.finalization;
   }
 }
 
 function normalizePath(input: string, workspaceRoot?: string): string {
-  if (!input || input.length === 0) return "";
-  const normalized = input.replace(/\\/g, "/");
-  const isAbsolute = path.posix.isAbsolute(normalized) || path.win32.isAbsolute(normalized);
-  let resolved = workspaceRoot && !isAbsolute
-    ? path.posix.join(workspaceRoot.replace(/\\/g, "/"), normalized)
-    : path.posix.normalize(normalized);
-  if (resolved === ".") return "";
-  if (resolved.length > 1 && resolved.endsWith("/")) resolved = resolved.slice(0, -1);
-  return resolved;
+  const slashNormalized = input.replace(/\\/g, "/");
+  let normalized = path.posix.normalize(
+    workspaceRoot
+      ? path.resolve(workspaceRoot, slashNormalized).replace(/\\/g, "/")
+      : slashNormalized,
+  );
+  if (normalized === ".") return "";
+  if (normalized.length > 1 && normalized.endsWith("/")) normalized = normalized.slice(0, -1);
+  return normalized;
 }
 
 function escapeRegExpChar(ch: string): string {
@@ -119,20 +109,19 @@ export function pathMatchesPattern(
   pattern: string,
   workspaceRoot?: string,
 ): boolean {
-  if (!pattern || pattern.length === 0) return false;
-  const targetPath = normalizePath(candidate, workspaceRoot);
+  const path = normalizePath(candidate, workspaceRoot);
   const normalizedPattern = normalizePath(pattern, workspaceRoot);
   if (normalizedPattern.length === 0) return false;
 
-  if (globPatternToRegExp(normalizedPattern).test(targetPath)) return true;
+  if (globPatternToRegExp(normalizedPattern).test(path)) return true;
 
   if (normalizedPattern.endsWith("/**")) {
     const base = normalizedPattern.slice(0, -3);
-    return targetPath === base || targetPath.startsWith(base + "/");
+    return path === base || path.startsWith(base + "/");
   }
 
   if (!/[?*]/.test(normalizedPattern)) {
-    return targetPath === normalizedPattern || targetPath.startsWith(normalizedPattern + "/");
+    return path === normalizedPattern || path.startsWith(normalizedPattern + "/");
   }
 
   return false;
@@ -143,35 +132,31 @@ export function pathMatchesPattern(
  *
  * Always whitelisted regardless of configuration: any tool whose name starts
  * with "todo" and the exact tool "skill". Configured patterns match exact tool
- * names, or as prefixes when the pattern ends with a trailing "*"
- * (e.g. "context7*" matches "context7-docs"). Structured entries may specify
- * allowedPaths for wildcard path scoping; string entries or structured entries
- * omitting allowedPaths are unrestricted ("*").
+ * names or glob patterns using "*", "**", and "?".
  */
 export function toolMatchesPattern(toolName: string, pattern: string): boolean {
-  if (pattern === toolName) return true;
-  if (!/[?*]/.test(pattern)) return false;
   return globPatternToRegExp(pattern).test(toolName);
 }
 
 export function matchesWhitelist(
   toolName: string,
-  patterns?: WhitelistedToolEntry[],
+  entries?: WhitelistedToolEntry[],
   args?: Record<string, unknown>,
   workspaceRoot?: string,
 ): boolean {
   if (toolName.startsWith("todo") || toolName === "skill") return true;
-  if (!patterns || patterns.length === 0) return false;
-  const targetPath = args !== undefined ? extractTargetPath(args) : undefined;
-  return patterns.some((entry) => {
+  if (!entries) return false;
+  return entries.some((entry) => {
     const pattern = typeof entry === "string" ? entry : entry.name;
     if (!toolMatchesPattern(toolName, pattern)) return false;
-    if (typeof entry === "string" || entry.allowedPaths === undefined) {
-      return true;
-    }
-    if (targetPath === undefined) return false;
-    return entry.allowedPaths.some((pathPattern) =>
-      pathMatchesPattern(targetPath, pathPattern, workspaceRoot),
+    if (typeof entry === "string" || !entry.allowedPaths?.length) return true;
+
+    const targetPath = extractTargetPath(args ?? {});
+    return (
+      targetPath !== undefined &&
+      entry.allowedPaths.some((allowedPath) =>
+        pathMatchesPattern(targetPath, allowedPath, workspaceRoot),
+      )
     );
   });
 }
@@ -215,17 +200,71 @@ function extractTargetPath(args: Record<string, unknown>): string | undefined {
   return undefined;
 }
 
+const HANDOVER_WRITE_TOOLS = new Set(["write", "edit", "apply_patch"]);
+
+/**
+ * Expected one-time scratch-handover file path for a session; undefined when
+ * the session has no agent name to bind the path to.
+ */
+function handoverTargetPath(session: SessionGuardState): string | undefined {
+  if (!session.agentName) return undefined;
+  return `Handovers/SCRATCH_${session.agentName}_${session.sessionID}.md`;
+}
+
+/**
+ * Handover advice is only meaningful for agents that can actually perform the
+ * recommended write: the resolved profile must allow at least one write-family
+ * tool in its finalization policy. Read-only profiles get no advice, matching
+ * the reference behavior where only write-capable agents were advised.
+ */
+function profileAdvisesHandover(profile: ResolvedAgentCapacityProfile): boolean {
+  const allowedTools = profile.finalization.allowedTools;
+  if (!Array.isArray(allowedTools)) return false;
+  return allowedTools.some((tool) => HANDOVER_WRITE_TOOLS.has(tool));
+}
+
+function handoverAdviceFor(session: SessionGuardState, profile: ResolvedAgentCapacityProfile): string {
+  if (session.isHandoverWritten) return "";
+  if (!profileAdvisesHandover(profile)) return "";
+  const expected = handoverTargetPath(session);
+  if (expected === undefined) return "";
+  return ` If you have the write tool and the task remains unfinished, you may preserve the critical context so another agent can complete it efficiently. To do that, write the handover to ${expected}`;
+}
+
+/**
+ * Recognizes only write-family calls (write, edit, apply_patch) whose target
+ * file path equals — or ends with, on a slash boundary — the session's
+ * designated `Handovers/SCRATCH_<agentName>_<sessionID>.md` handover file.
+ * Requires a session agent name and a string target path; near-suffix paths
+ * without a slash boundary and non-write-family tools never match.
+ */
+function isHandoverTarget(
+  session: SessionGuardState,
+  toolName: string | undefined,
+  args: Record<string, unknown> | undefined,
+): boolean {
+  if (toolName === undefined || !HANDOVER_WRITE_TOOLS.has(toolName)) return false;
+  if (!session.agentName || args === undefined) return false;
+  const targetPath = extractTargetPath(args);
+  if (targetPath === undefined) return false;
+  const expected = handoverTargetPath(session);
+  if (expected === undefined) return false;
+  const normalized = normalizePath(targetPath);
+  return normalized === expected || normalized.endsWith(`/${expected}`);
+}
+
 export class SessionStateManager {
   private sessions = new Map<string, SessionGuardState>();
   private sessionConfigs = new Map<string, ResolvedContextGuardConfig>();
   private attemptedCallIDs = new Map<string, BoundedCallIDCache>();
   private succeededCallIDs = new Map<string, BoundedCallIDCache>();
   private config: ResolvedContextGuardConfig;
-  private workspaceRoot: string;
 
-  constructor(config: ResolvedContextGuardConfig = DEFAULT_CONFIG, workspaceRoot = process.cwd()) {
+  constructor(
+    config: ResolvedContextGuardConfig = DEFAULT_CONFIG,
+    private readonly workspaceRoot?: string,
+  ) {
     this.config = config;
-    this.workspaceRoot = normalizePath(workspaceRoot);
   }
 
   private configForSession(sessionID: string): ResolvedContextGuardConfig {
@@ -256,6 +295,7 @@ export class SessionStateManager {
       latestContextTokens: null,
       lastTokenMessageId: null,
       finalizationToolsUsed: 0,
+      isHandoverWritten: false,
       exhaustionReason: null,
       createdAt: now,
       lastActiveAt: now,
@@ -361,6 +401,15 @@ export class SessionStateManager {
     // tools; the whitelist only exempts toolCount. Gated on a configured cap
     // so profiles without finalizationRemaining keep their previous state.
     const beganInFinalization = session.stage === "finalization";
+    // The designated one-time handover write never consumes a finalization
+    // slot; its successful after-hook flips the one-time latch. Only calls
+    // that began in finalization count as handoverSuccess: an execution-stage
+    // call to the designated path is an ordinary call — it keeps ordinary
+    // accounting, does not consume the escape hatch, and may itself trigger
+    // the phase transition via advanceStage. Ordinary tool/success/token
+    // accounting applies to it unchanged.
+    const handoverSuccess =
+      beganInFinalization && isHandoverTarget(session, toolName, args);
     session.toolCallsSucceeded += 1;
     if (!whitelisted) session.toolCount += 1;
     session.tokensInput += Math.max(0, argsTokens);
@@ -376,10 +425,12 @@ export class SessionStateManager {
     this.advanceStage(session);
     if (
       beganInFinalization &&
-      effectiveProfile.finalizationRemaining !== undefined
+      effectiveProfile.finalizationRemaining !== undefined &&
+      !handoverSuccess
     ) {
       session.finalizationToolsUsed += 1;
     }
+    if (handoverSuccess) session.isHandoverWritten = true;
   }
 
   recordToolExecution(sessionID: string, outputText = ""): void {
@@ -467,6 +518,15 @@ export class SessionStateManager {
     const effectiveConfig = config ?? this.configForSession(sessionID);
     if (this.isAgentExempt(session.agentName, effectiveConfig)) return true;
 
+    // One-time handover escape hatch: the first write-family call targeting
+    // the session's designated scratch-handover file bypasses finalization
+    // allowedTools/allowedPaths and finalizationRemaining exhaustion. Once
+    // the handover has been written, further handover attempts block instead
+    // of falling through ordinary policy.
+    if (isHandoverTarget(session, toolName, args)) {
+      return !session.isHandoverWritten;
+    }
+
     // Resolve the effective profile exactly like every other enforcement
     // site; the defaults fallback never carries a finalization cap.
     const profile = this.resolveProfile(session.agentName, effectiveConfig);
@@ -479,9 +539,7 @@ export class SessionStateManager {
       if (session.finalizationToolsUsed >= profile.finalizationRemaining) return false;
     }
 
-    if (!policy.allowedTools.some((pattern) => toolMatchesPattern(toolName, pattern))) {
-      return false;
-    }
+    if (!policy.allowedTools.some((pattern) => toolMatchesPattern(toolName, pattern))) return false;
 
     const targetPath = extractTargetPath(args);
     const allowedPaths = policy.allowedPaths;
@@ -511,29 +569,51 @@ export class SessionStateManager {
       maxTools: profile.maxTools,
       tokensIngested: session.tokensIngested,
       maxTokens: profile.maxTokens,
-      finalization: profile.finalization,
     };
+    // Advertise the one-time handover escape hatch on every finalization
+    // rejection while it is still available — but only for profiles whose
+    // finalization policy allows a write-family tool; read-only agents cannot
+    // perform the recommended write and get no advice.
+    const handoverAdvice = handoverAdviceFor(session, profile);
+    // Bounded finalization uses reference-style cap messages instead of the
+    // generic breach format; profiles without a cap keep the legacy error.
     if (session.stage === "finalization" && profile.finalizationRemaining !== undefined) {
       const remaining = profile.finalizationRemaining - session.finalizationToolsUsed;
-      if (remaining <= 0) {
+      // A repeated designated-handover attempt blocks under the exhausted
+      // policy even while ordinary finalization slots remain.
+      const repeatHandover =
+        session.isHandoverWritten && isHandoverTarget(session, toolName, args);
+      if (remaining <= 0 || repeatHandover) {
         const message =
-          "Finalization calls exhausted for this subagent. Don't use more tools, henceforth they are blocked automatically. Proceed to report.";
+          "Finalization calls exhausted for this subagent. Don't use more tools, henceforth they are blocked automatically. Proceed to report." +
+          handoverAdvice;
         throw new CapacityLimitError(limitInfo, message);
       }
-      const tools =
-        profile.finalization.allowedTools.length > 0
-          ? profile.finalization.allowedTools.join(", ")
-          : "none";
-      const paths =
-        profile.finalization.allowedPaths && profile.finalization.allowedPaths.length > 0
-          ? ` (allowed paths: ${profile.finalization.allowedPaths.join(", ")})`
-          : "";
       throw new CapacityLimitError(
         limitInfo,
-        `Finalization: ${remaining} call(s) remaining. Only ${tools}${paths} allowed.`,
+        `Finalization: ${remaining} call(s) remaining. Only ${profile.finalization.allowedTools.join(", ")} allowed.${handoverAdvice}`,
       );
     }
-    throw new CapacityLimitError(limitInfo);
+    // Uncapped legacy/generic finalization rejections keep the legacy breach
+    // format, extended with the same advice while the hatch is available.
+    throw new CapacityLimitError(
+      limitInfo,
+      handoverAdvice ? formatCapacityBreachMessage(limitInfo) + handoverAdvice : undefined,
+    );
+  }
+
+  /**
+   * Status-line accessor: the handover advice for a session's current state,
+   * or "" when the session is unknown, the profile is not write-capable, or
+   * the handover has already been written.
+   */
+  handoverAdvice(sessionID: string): string {
+    const session = this.sessions.get(sessionID);
+    if (!session) return "";
+    return handoverAdviceFor(
+      session,
+      this.resolveProfile(session.agentName, this.configForSession(sessionID)),
+    );
   }
 
   getRemainingBudget(sessionID: string): SessionBudgetStatus | undefined {
@@ -558,6 +638,7 @@ export class SessionStateManager {
       exhaustionReason: session.exhaustionReason,
       exempt,
       finalizationToolsUsed: session.finalizationToolsUsed,
+      isHandoverWritten: session.isHandoverWritten,
       finalizationRemaining: profile.finalizationRemaining,
     };
   }
