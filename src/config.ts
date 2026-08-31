@@ -27,7 +27,13 @@ export const REFERENCE_AGENT_BUDGETS: Record<string, AgentCapacityProfile> = {
       allowedPaths: [".agent_file_explorer.md"],
     },
   },
-  "code-reviewer": { maxTools: 12, maxTokens: 18000, whitelistedTools: ["lsp"] },
+  "code-reviewer": { 
+    maxTools: 12, 
+    maxTokens: 18000, 
+    whitelistedTools: ["context7*", "task", "lsp", "todo*",],
+    finalizationRemaining: 5,
+    finalization: { allowedTools: ["bash"] }
+   },
   "security-reviewer": { maxTools: 14, maxTokens: 24000, whitelistedTools: ["lsp"] },
   planner: {
     maxTools: 15,
@@ -54,7 +60,7 @@ export const REFERENCE_AGENT_BUDGETS: Record<string, AgentCapacityProfile> = {
     maxTools: 24,
     maxTokens: 48000,
     finalizationRemaining: 10,
-    finalization: { allowedTools: ["write", "edit", "apply_patch"] },
+    finalization: { allowedTools: ["write", "edit", "apply_patch", "bash"] },
     whitelistedTools: ["context7*", "task", "lsp", "todo*",
       { name: "read", allowedPaths: [".agent_coder.md"] },
       { name: "write", allowedPaths: [".agent_coder.md"] },
