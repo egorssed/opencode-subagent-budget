@@ -60,6 +60,10 @@ export type ExhaustionReason = "tool_limit" | "token_limit" | "manual";
 export interface SessionGuardState {
   sessionID: string;
   agentName: string;
+  /** True for child sessions, false for roots, undefined until resolved. */
+  isSubagent?: boolean;
+  /** Set after a child session successfully completes todowrite. */
+  hasPlanned?: boolean;
   stage: SessionStage;
   toolCount: number;
   toolCallsAttempted: number;

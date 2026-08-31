@@ -2,6 +2,7 @@ import type { Hooks, Plugin, PluginInput, PluginOptions, PluginModule } from "@o
 import { resolveConfig } from "./config.ts";
 import { estimateArgsTokens } from "./core/estimator.ts";
 import { SessionStateManager } from "./core/state.ts";
+import type { SessionGuardState } from "./types.ts";
 
 export const server: Plugin = async (
   input: PluginInput,
@@ -12,6 +13,21 @@ export const server: Plugin = async (
 
   const stateManager = new SessionStateManager(config, input.directory);
   const sessionAgent = new Map<string, string>();
+  const isSubagent = async (
+    sessionID: string,
+    session: SessionGuardState,
+  ): Promise<boolean> => {
+    if (session.isSubagent !== undefined) return session.isSubagent;
+
+    try {
+      const result = await input.client.session.get({ path: { id: sessionID } });
+      session.isSubagent =
+        typeof result.data?.parentID === "string" && result.data.parentID !== "";
+      return session.isSubagent;
+    } catch {
+      return false;
+    }
+  };
 
   return {
     "chat.params": async (input) => {
@@ -20,10 +36,26 @@ export const server: Plugin = async (
     },
 
     "tool.execute.before": async (input, output) => {
+      if (typeof input.sessionID !== "string") return;
+      const tool = String(input.tool ?? "");
+      const session = stateManager.getOrCreateSession(
+        input.sessionID,
+        sessionAgent.get(input.sessionID) ?? "",
+      );
+      if (
+        !session.hasPlanned &&
+        !tool.startsWith("todo") &&
+        tool !== "skill" &&
+        (await isSubagent(input.sessionID, session))
+      ) {
+        throw new Error(
+          "Direct execution is blocked. You MUST consider the task and plan your actions ahead. Only when you issue a viable todo list with 'todowrite' tool you will be allowed to call tools.",
+        );
+      }
+
       const agent = sessionAgent.get(input.sessionID);
       if (!agent || stateManager.isAgentExempt(agent)) return;
 
-      const session = stateManager.getOrCreateSession(input.sessionID, agent);
       stateManager.recordToolAttempt(input.sessionID, input.callID);
       if (session.stage !== "finalization") return;
 
@@ -35,6 +67,14 @@ export const server: Plugin = async (
     },
 
     "tool.execute.after": async (input, output) => {
+      if (typeof input.sessionID !== "string") return;
+      if (String(input.tool ?? "") === "todowrite") {
+        const session = stateManager.getSession(input.sessionID);
+        if (session && (await isSubagent(input.sessionID, session))) {
+          session.hasPlanned = true;
+        }
+      }
+
       const agent = sessionAgent.get(input.sessionID);
       if (!agent || stateManager.isAgentExempt(agent)) return;
 

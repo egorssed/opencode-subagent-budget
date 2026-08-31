@@ -222,7 +222,10 @@ export class SessionStateManager {
   ): SessionGuardState {
     if (config) this.sessionConfigs.set(sessionID, config);
     const existing = this.sessions.get(sessionID);
-    if (existing) return existing;
+    if (existing) {
+      if (!existing.agentName && agentName) existing.agentName = agentName;
+      return existing;
+    }
 
     const now = Date.now();
     const session: SessionGuardState = {
@@ -359,8 +362,7 @@ export class SessionStateManager {
     this.advanceStage(session);
     if (
       beganInFinalization &&
-      effectiveProfile.finalizationRemaining !== undefined &&
-      true
+      effectiveProfile.finalizationRemaining !== undefined
     ) {
       session.finalizationToolsUsed += 1;
     }
