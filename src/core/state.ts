@@ -3,6 +3,7 @@ import path from "node:path";
 import { DEFAULT_CONFIG } from "../config.ts";
 import type {
   ExhaustionReason,
+  FinalizationPolicy,
   ResolvedAgentCapacityProfile,
   ResolvedContextGuardConfig,
   SessionGuardState,
@@ -18,6 +19,7 @@ export interface CapacityLimitErrorInfo {
   maxTools: number;
   tokensIngested: number;
   maxTokens: number;
+  finalization?: FinalizationPolicy;
 }
 
 export interface SessionBudgetStatus {
@@ -38,11 +40,19 @@ export interface SessionBudgetStatus {
 }
 
 export function formatCapacityBreachMessage(info: CapacityLimitErrorInfo): string {
+  const tools =
+    info.finalization?.allowedTools && info.finalization.allowedTools.length > 0
+      ? info.finalization.allowedTools.join(", ")
+      : "none";
+  const paths =
+    info.finalization?.allowedPaths && info.finalization.allowedPaths.length > 0
+      ? ` (allowed paths: ${info.finalization.allowedPaths.join(", ")})`
+      : "";
   return [
     `[Capacity Guard] Session limit reached for agent "@${info.agentName}".`,
     "Current stage: FINALIZATION",
     `Limit exceeded: ${info.reason} (Used: ${info.toolCount}/${info.maxTools} tools, ${info.tokensIngested}/${info.maxTokens} tokens).`,
-    "Action required: Tool execution is restricted in finalization stage. Please summarize your findings, provide your final report, or complete task handover in your text response.",
+    `Action required: Tool execution is restricted in finalization stage. Allowed tools: ${tools}${paths}. Summarize your findings and provide your report in your text response.`,
   ].join("\n");
 }
 
@@ -53,6 +63,7 @@ export class CapacityLimitError extends Error {
   readonly maxTools: number;
   readonly tokensIngested: number;
   readonly maxTokens: number;
+  readonly finalization?: FinalizationPolicy;
 
   constructor(info: CapacityLimitErrorInfo, message?: string) {
     super(message ?? formatCapacityBreachMessage(info));
@@ -63,14 +74,16 @@ export class CapacityLimitError extends Error {
     this.maxTools = info.maxTools;
     this.tokensIngested = info.tokensIngested;
     this.maxTokens = info.maxTokens;
+    this.finalization = info.finalization;
   }
 }
 
 function normalizePath(input: string, workspaceRoot?: string): string {
   if (!input || input.length === 0) return "";
   const normalized = input.replace(/\\/g, "/");
-  let resolved = workspaceRoot
-    ? path.resolve(workspaceRoot, normalized).replace(/\\/g, "/")
+  const isAbsolute = path.posix.isAbsolute(normalized) || path.win32.isAbsolute(normalized);
+  let resolved = workspaceRoot && !isAbsolute
+    ? path.posix.join(workspaceRoot.replace(/\\/g, "/"), normalized)
     : path.posix.normalize(normalized);
   if (resolved === ".") return "";
   if (resolved.length > 1 && resolved.endsWith("/")) resolved = resolved.slice(0, -1);
@@ -493,6 +506,7 @@ export class SessionStateManager {
       maxTools: profile.maxTools,
       tokensIngested: session.tokensIngested,
       maxTokens: profile.maxTokens,
+      finalization: profile.finalization,
     };
     if (session.stage === "finalization" && profile.finalizationRemaining !== undefined) {
       const remaining = profile.finalizationRemaining - session.finalizationToolsUsed;
@@ -501,9 +515,17 @@ export class SessionStateManager {
           "Finalization calls exhausted for this subagent. Don't use more tools, henceforth they are blocked automatically. Proceed to report.";
         throw new CapacityLimitError(limitInfo, message);
       }
+      const tools =
+        profile.finalization.allowedTools.length > 0
+          ? profile.finalization.allowedTools.join(", ")
+          : "none";
+      const paths =
+        profile.finalization.allowedPaths && profile.finalization.allowedPaths.length > 0
+          ? ` (allowed paths: ${profile.finalization.allowedPaths.join(", ")})`
+          : "";
       throw new CapacityLimitError(
         limitInfo,
-        `Finalization: ${remaining} call(s) remaining. Only ${profile.finalization.allowedTools.join(", ")} allowed.`,
+        `Finalization: ${remaining} call(s) remaining. Only ${tools}${paths} allowed.`,
       );
     }
     throw new CapacityLimitError(limitInfo);

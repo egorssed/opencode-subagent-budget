@@ -51,10 +51,6 @@ function makeConfig(options: ContextGuardOptions): ResolvedContextGuardConfig {
   return resolveConfig(options as unknown as PluginOptions);
 }
 
-/** Advice suffix write-capable profiles' finalization rejections/statuses gain while the hatch is available. */
-const ADVICE_PREFIX =
-  " If you have the write tool and the task remains unfinished, you may preserve the critical context so another agent can complete it efficiently. To do that, write the handover to ";
-
 async function callHook(
   hook: unknown,
   input: Record<string, unknown>,
@@ -425,7 +421,6 @@ describe("SessionStateManager lifecycle", () => {
     assert.equal(s.tokensOutput, 0);
     assert.equal(s.tokensIngested, 0);
     assert.equal(s.finalizationToolsUsed, 0);
-    assert.equal(s.isHandoverWritten, false);
     assert.equal(s.exhaustionReason, null);
     assert.equal(s.agentName, "explore");
     assert.equal(s.sessionID, "s1");
@@ -657,15 +652,12 @@ describe("finalization whitelist enforcement", () => {
 
   test("assertOperationPermitted throws with contract message and fields", () => {
     const m = exhaustedWriter();
-    // The handover advice is only appended while the one-time escape hatch is
-    // still available; latch it so the legacy breach message keeps its exact
-    // contract form.
-    m.getSession("s1")!.isHandoverWritten = true;
+    const finalization = { allowedTools: ["write", "edit"], allowedPaths: ["./reports/**"] };
     const expected = [
       '[Capacity Guard] Session limit reached for agent "@writer".',
       "Current stage: FINALIZATION",
       "Limit exceeded: tool_limit (Used: 2/2 tools, 0/99000 tokens).",
-      "Action required: Tool execution is restricted in finalization stage. Please summarize your findings, provide your final report, or complete task handover in your text response.",
+      "Action required: Tool execution is restricted in finalization stage. Allowed tools: write, edit (allowed paths: ./reports/**). Summarize your findings and provide your report in your text response.",
     ].join("\n");
 
     let caught: unknown;
@@ -684,6 +676,7 @@ describe("finalization whitelist enforcement", () => {
     assert.equal(error.maxTools, 2);
     assert.equal(error.tokensIngested, 0);
     assert.equal(error.maxTokens, 99000);
+    assert.deepEqual(error.finalization, finalization);
     assert.equal(
       formatCapacityBreachMessage({
         agentName: "writer",
@@ -692,6 +685,7 @@ describe("finalization whitelist enforcement", () => {
         maxTools: 2,
         tokensIngested: 0,
         maxTokens: 99000,
+        finalization,
       }),
       expected,
     );
@@ -1433,8 +1427,7 @@ describe("bounded finalization (finalizationRemaining)", () => {
     assert.ok(caught instanceof CapacityLimitError);
     assert.equal(
       (caught as CapacityLimitError).message,
-      "Finalization: 2 call(s) remaining. Only write, edit, apply_patch allowed." +
-        `${ADVICE_PREFIX}Handovers/SCRATCH_planner_s1.md`,
+      "Finalization: 2 call(s) remaining. Only write, edit, apply_patch allowed.",
     );
   });
 
@@ -1532,7 +1525,7 @@ describe("bounded finalization (finalizationRemaining)", () => {
     assert.equal(system.length, 1);
     assert.equal(
       system[0],
-      "[capacity-guard] tools: 13/15 (2 remaining); tokens: 0/18000 (~18000 remaining); stage: finalization; finalization: 0/2 used ⚠️ FORCEFUL WRAP-UP: You have exactly 2 finalization call(s) remaining. Stop exploring and start producing your deliverable immediately. If you have the write tool and the task remains unfinished, you may preserve the critical context so another agent can complete it efficiently. To do that, write the handover to Handovers/SCRATCH_planner_sP.md",
+      "[capacity-guard] tools: 13/15 (2 remaining); tokens: 0/18000 (~18000 remaining); stage: finalization; finalization: 0/2 used ⚠️ FORCEFUL WRAP-UP: You have exactly 2 finalization call(s) remaining. Stop exploring and start producing your deliverable immediately.",
     );
 
     // Non-allowed tool blocked with remaining-count message before the cap.
@@ -1541,8 +1534,7 @@ describe("bounded finalization (finalizationRemaining)", () => {
       (err: unknown) =>
         err instanceof CapacityLimitError &&
         err.message ===
-          "Finalization: 2 call(s) remaining. Only write, edit, apply_patch allowed." +
-            `${ADVICE_PREFIX}Handovers/SCRATCH_planner_sP.md`,
+          "Finalization: 2 call(s) remaining. Only write, edit, apply_patch allowed.",
     );
 
     // First allowed finalization call: LAST CALL notice with one slot left.
@@ -1556,7 +1548,7 @@ describe("bounded finalization (finalizationRemaining)", () => {
     );
     assert.equal(
       lastCall[0],
-      "[capacity-guard] tools: 14/15 (1 remaining); tokens: 0/18000 (~18000 remaining); stage: finalization; finalization: 1/2 used 🚨 LAST CALL: This is your FINAL tool call. You must produce your deliverable NOW. If you have the write tool and the task remains unfinished, you may preserve the critical context so another agent can complete it efficiently. To do that, write the handover to Handovers/SCRATCH_planner_sP.md",
+      "[capacity-guard] tools: 14/15 (1 remaining); tokens: 0/18000 (~18000 remaining); stage: finalization; finalization: 1/2 used 🚨 LAST CALL: This is your FINAL tool call. You must produce your deliverable NOW.",
     );
 
     // Second and final allowed call consumes the last slot.
@@ -1574,8 +1566,7 @@ describe("bounded finalization (finalizationRemaining)", () => {
       (err: unknown) => err instanceof CapacityLimitError && err.message.includes("exhausted"),
     );
 
-    // Exhausted status: no wrap-up notice fires, but the handover advice is
-    // still advertised while the hatch remains available.
+    // Exhausted status: no wrap-up notice fires.
     const exhaustedStatus: string[] = [];
     await callHook(
       hooks["experimental.chat.system.transform"],
@@ -1584,8 +1575,7 @@ describe("bounded finalization (finalizationRemaining)", () => {
     );
     assert.equal(
       exhaustedStatus[0],
-      "[capacity-guard] tools: 15/15 (0 remaining); tokens: 0/18000 (~18000 remaining); stage: finalization; finalization: 2/2 used" +
-        `${ADVICE_PREFIX}Handovers/SCRATCH_planner_sP.md`,
+      "[capacity-guard] tools: 15/15 (0 remaining); tokens: 0/18000 (~18000 remaining); stage: finalization; finalization: 2/2 used",
     );
   });
 
@@ -1724,386 +1714,6 @@ describe("bounded finalization (finalizationRemaining)", () => {
     const s = m.getOrCreateSession("s1", "boss");
     assert.equal(s.stage, "execution");
     assert.equal(s.exhaustionReason, null);
-  });
-});
-
-describe("handover escape hatch (one-time scratch handover)", () => {
-  const handoverPath = (sessionID: string, agentName = "planner") =>
-    `Handovers/SCRATCH_${agentName}_${sessionID}.md`;
-
-  /** Planner in finalization with both configured slots already consumed. */
-  function exhaustedManager(agentName = "planner"): SessionStateManager {
-    const m = new SessionStateManager(makeConfig({}));
-    m.getOrCreateSession("s1", agentName);
-    m.transitionToFinalization("s1", "tool_limit");
-    m.recordToolSuccess("s1", 0, "", "o1", "write");
-    m.recordToolSuccess("s1", 0, "", "o2", "edit");
-    return m;
-  }
-
-  test("each write-family tool bypasses exhausted finalization for the designated handover path", () => {
-    for (const tool of ["write", "edit", "apply_patch"]) {
-      const m = exhaustedManager();
-      assert.equal(
-        m.isOperationPermittedInFinalization("s1", tool, { filePath: handoverPath("s1") }),
-        true,
-      );
-      assert.doesNotThrow(() =>
-        m.assertOperationPermitted("s1", tool, { filePath: handoverPath("s1") }),
-      );
-    }
-  });
-
-  test("recognizes exact and slash-suffix paths via filePath or path, with separators normalized", () => {
-    const m = exhaustedManager();
-    assert.equal(
-      m.isOperationPermittedInFinalization("s1", "write", { filePath: handoverPath("s1") }),
-      true,
-    );
-    assert.equal(
-      m.isOperationPermittedInFinalization("s1", "write", {
-        filePath: `/repo/${handoverPath("s1")}`,
-      }),
-      true,
-    );
-    assert.equal(
-      m.isOperationPermittedInFinalization("s1", "write", {
-        filePath: `C:\\repo\\${handoverPath("s1").split("/").join("\\")}`,
-      }),
-      true,
-    );
-    assert.equal(
-      m.isOperationPermittedInFinalization("s1", "write", { path: handoverPath("s1") }),
-      true,
-    );
-    // Near-suffix without a slash boundary never matches.
-    assert.equal(
-      m.isOperationPermittedInFinalization("s1", "write", { filePath: `X${handoverPath("s1")}` }),
-      false,
-    );
-    // A different agent's or session's handover file never matches.
-    assert.equal(
-      m.isOperationPermittedInFinalization("s1", "write", {
-        filePath: handoverPath("s1", "coder"),
-      }),
-      false,
-    );
-    assert.equal(
-      m.isOperationPermittedInFinalization("s1", "write", { filePath: "Handovers/other.md" }),
-      false,
-    );
-  });
-
-  test("wrong tool or wrong path never triggers the escape hatch", () => {
-    const m = exhaustedManager();
-    assert.equal(
-      m.isOperationPermittedInFinalization("s1", "read", { filePath: handoverPath("s1") }),
-      false,
-    );
-    assert.equal(
-      m.isOperationPermittedInFinalization("s1", "bash", { filePath: handoverPath("s1") }),
-      false,
-    );
-    assert.equal(
-      m.isOperationPermittedInFinalization("s1", "write", { filePath: "notes.md" }),
-      false,
-    );
-  });
-
-  test("allowed once: success flips the latch, skips the finalization slot, keeps ordinary accounting", () => {
-    const m = exhaustedManager();
-    m.recordToolSuccess("s1", 10, "handover body", "h1", "write", {
-      filePath: handoverPath("s1"),
-    });
-    const s = m.getSession("s1")!;
-    assert.equal(s.isHandoverWritten, true);
-    // The handover write did not consume a finalization slot.
-    assert.equal(s.finalizationToolsUsed, 2);
-    // Ordinary tool/success/token accounting is unchanged.
-    assert.equal(s.toolCount, 3);
-    assert.equal(s.toolCallsSucceeded, 3);
-    assert.ok(s.tokensIngested > 0);
-  });
-
-  test("further handover attempts block after the latch, even with finalization slots remaining", () => {
-    const m = new SessionStateManager(makeConfig({}));
-    m.getOrCreateSession("s1", "planner");
-    m.transitionToFinalization("s1", "tool_limit");
-    assert.equal(
-      m.isOperationPermittedInFinalization("s1", "write", { filePath: handoverPath("s1") }),
-      true,
-    );
-    m.recordToolSuccess("s1", 0, "", "h1", "write", { filePath: handoverPath("s1") });
-    assert.equal(
-      m.isOperationPermittedInFinalization("s1", "write", { filePath: handoverPath("s1") }),
-      false,
-    );
-    let caught: unknown;
-    try {
-      m.assertOperationPermitted("s1", "write", { filePath: handoverPath("s1") });
-    } catch (err) {
-      caught = err;
-    }
-    assert.ok(caught instanceof CapacityLimitError);
-    const message = (caught as CapacityLimitError).message;
-    assert.ok(message.includes("Finalization calls exhausted for this subagent."));
-    // No advice: the escape hatch has already been consumed.
-    assert.ok(!message.includes("If you have the write tool"));
-    // A post-latch remaining-count rejection (slots still open) also omits
-    // the advice.
-    let caughtRemaining: unknown;
-    try {
-      m.assertOperationPermitted("s1", "read", {});
-    } catch (err) {
-      caughtRemaining = err;
-    }
-    assert.ok(caughtRemaining instanceof CapacityLimitError);
-    assert.equal(
-      (caughtRemaining as CapacityLimitError).message,
-      "Finalization: 2 call(s) remaining. Only write, edit, apply_patch allowed.",
-    );
-  });
-
-  test("bounded remaining-count path-policy rejection advertises the handover advice while available", () => {
-    const m = new SessionStateManager(
-      makeConfig({
-        agents: {
-          pth: {
-            maxTools: 5,
-            maxTokens: 40000,
-            finalizationRemaining: 2,
-            finalization: { allowedTools: ["write"], allowedPaths: ["reports/**"] },
-          },
-        },
-      }),
-    );
-    m.getOrCreateSession("s1", "pth");
-    m.transitionToFinalization("s1", "tool_limit");
-    // An allowed tool targeting a disallowed path blocks with the
-    // remaining-count text plus the advice while the hatch is available.
-    let caught: unknown;
-    try {
-      m.assertOperationPermitted("s1", "write", { filePath: "elsewhere/notes.md" });
-    } catch (err) {
-      caught = err;
-    }
-    assert.ok(caught instanceof CapacityLimitError);
-    assert.equal(
-      (caught as CapacityLimitError).message,
-      "Finalization: 2 call(s) remaining. Only write allowed." +
-        `${ADVICE_PREFIX}Handovers/SCRATCH_pth_s1.md`,
-    );
-    // After the latch, the same rejection no longer advertises the path.
-    m.recordToolSuccess("s1", 0, "", "h1", "write", { filePath: handoverPath("s1", "pth") });
-    let caughtAfter: unknown;
-    try {
-      m.assertOperationPermitted("s1", "write", { filePath: "elsewhere/notes.md" });
-    } catch (err) {
-      caughtAfter = err;
-    }
-    assert.ok(caughtAfter instanceof CapacityLimitError);
-    assert.equal(
-      (caughtAfter as CapacityLimitError).message,
-      "Finalization: 2 call(s) remaining. Only write allowed.",
-    );
-  });
-
-  test("exhausted block message advertises the handover advice with the session-specific path", () => {
-    const m = exhaustedManager();
-    let caught: unknown;
-    try {
-      m.assertOperationPermitted("s1", "write", { filePath: "notes.md" });
-    } catch (err) {
-      caught = err;
-    }
-    assert.ok(caught instanceof CapacityLimitError);
-    assert.ok(
-      (caught as CapacityLimitError).message.endsWith(
-        `${ADVICE_PREFIX}${handoverPath("s1")}`,
-      ),
-    );
-  });
-
-  test("duplicate successful callID delivery stays idempotent for the handover latch", () => {
-    const m = exhaustedManager();
-    m.recordToolSuccess("s1", 0, "", "h1", "write", { filePath: handoverPath("s1") });
-    m.recordToolSuccess("s1", 0, "", "h1", "write", { filePath: handoverPath("s1") });
-    const s = m.getSession("s1")!;
-    assert.equal(s.isHandoverWritten, true);
-    assert.equal(s.toolCallsSucceeded, 3);
-    assert.equal(s.toolCount, 3);
-    assert.equal(s.finalizationToolsUsed, 2);
-  });
-
-  test("hook plumbing: status line advertises the path while available and stops after the handover", async () => {
-    const hooks = await server({} as unknown as PluginInput, makeConfig({}) as unknown as PluginOptions);
-    await callHook(hooks["chat.params"], { sessionID: "sH", agent: "planner" });
-    for (let i = 0; i < 13; i++) {
-      await callHook(hooks["tool.execute.before"], { sessionID: "sH", tool: "grep" }, { args: {} });
-      await callHook(hooks["tool.execute.after"], { sessionID: "sH", tool: "grep" }, { output: "" });
-    }
-    const system: string[] = [];
-    await callHook(
-      hooks["experimental.chat.system.transform"],
-      { sessionID: "sH", model: "m" },
-      { system },
-    );
-    assert.ok(system[0]!.endsWith(`${ADVICE_PREFIX}Handovers/SCRATCH_planner_sH.md`));
-
-    // The handover write passes the before-hook and its after-hook flips the
-    // latch without consuming a finalization slot.
-    const handoverArgs = { filePath: "Handovers/SCRATCH_planner_sH.md" };
-    await callHook(
-      hooks["tool.execute.before"],
-      { sessionID: "sH", tool: "write", callID: "h1" },
-      { args: handoverArgs },
-    );
-    await callHook(
-      hooks["tool.execute.after"],
-      { sessionID: "sH", tool: "write", callID: "h1", args: handoverArgs },
-      { output: "" },
-    );
-    const after: string[] = [];
-    await callHook(
-      hooks["experimental.chat.system.transform"],
-      { sessionID: "sH", model: "m" },
-      { system: after },
-    );
-    assert.ok(!after[0]!.includes("If you have the write tool"));
-    // The handover did not consume a finalization slot.
-    assert.ok(after[0]!.includes("finalization: 0/2 used"));
-    // A further handover write attempt is blocked even though slots remain.
-    await assert.rejects(
-      callHook(
-        hooks["tool.execute.before"],
-        { sessionID: "sH", tool: "write", callID: "h2" },
-        { args: handoverArgs },
-      ),
-      (err: unknown) =>
-        err instanceof CapacityLimitError &&
-        err.message.includes("Finalization calls exhausted for this subagent."),
-    );
-  });
-
-  test("legacy profile without a finalization cap advertises the handover until the latch, then stops", async () => {
-    const legacyConfig = {
-      defaults: { maxTools: 3, maxTokens: 99000, finalization: { allowedTools: ["read"] } },
-    };
-    const m = new SessionStateManager(makeConfig(legacyConfig));
-    m.getOrCreateSession("s1", "explore");
-    m.transitionToFinalization("s1", "tool_limit");
-    // The one-time handover write is still honored without a configured cap.
-    assert.equal(
-      m.isOperationPermittedInFinalization("s1", "write", {
-        filePath: handoverPath("s1", "explore"),
-      }),
-      true,
-    );
-    m.recordToolSuccess("s1", 0, "", "h1", "write", {
-      filePath: handoverPath("s1", "explore"),
-    });
-    assert.equal(m.getSession("s1")!.isHandoverWritten, true);
-    assert.equal(
-      m.isOperationPermittedInFinalization("s1", "write", {
-        filePath: handoverPath("s1", "explore"),
-      }),
-      false,
-    );
-    // Unbounded allowed calls remain. A post-latch policy violation keeps the
-    // legacy breach format and no longer advertises the consumed hatch.
-    let caught: unknown;
-    try {
-      m.assertOperationPermitted("s1", "write", {});
-    } catch (err) {
-      caught = err;
-    }
-    assert.ok(caught instanceof CapacityLimitError);
-    assert.ok(
-      (caught as CapacityLimitError).message.startsWith(
-        '[Capacity Guard] Session limit reached for agent "@explore".',
-      ),
-    );
-    assert.ok(
-      !(caught as CapacityLimitError).message.includes("If you have the write tool"),
-    );
-    // The status line advertises the path for the fresh uncapped session...
-    const hooks = await server({} as unknown as PluginInput, makeConfig(legacyConfig) as unknown as PluginOptions);
-    await callHook(hooks["chat.params"], { sessionID: "sL", agent: "explore" });
-    for (let i = 0; i < 3; i++) {
-      await callHook(hooks["tool.execute.before"], { sessionID: "sL", tool: "grep" }, { args: {} });
-      await callHook(hooks["tool.execute.after"], { sessionID: "sL", tool: "grep" }, { output: "" });
-    }
-    const system: string[] = [];
-    await callHook(
-      hooks["experimental.chat.system.transform"],
-      { sessionID: "sL", model: "m" },
-      { system },
-    );
-    assert.deepEqual(system, [
-      "[capacity-guard] tools: 3/3 (0 remaining); tokens: 0/99000 (~99000 remaining); stage: finalization",
-    ]);
-    // ...and stops advertising once the handover has been written.
-    const latchArgs = { filePath: handoverPath("sL", "explore") };
-    await callHook(
-      hooks["tool.execute.before"],
-      { sessionID: "sL", tool: "write", callID: "h1" },
-      { args: latchArgs },
-    );
-    await callHook(
-      hooks["tool.execute.after"],
-      { sessionID: "sL", tool: "write", callID: "h1", args: latchArgs },
-      { output: "" },
-    );
-    const after: string[] = [];
-    await callHook(
-      hooks["experimental.chat.system.transform"],
-      { sessionID: "sL", model: "m" },
-      { system: after },
-    );
-    assert.deepEqual(after, [
-      "[capacity-guard] tools: 4/3 (-1 remaining); tokens: 12/99000 (~98988 remaining); stage: finalization",
-    ]);
-  });
-
-  test("execution-stage designated write stays ordinary: no latch, hatch stays available for finalization", () => {
-    const m = new SessionStateManager(makeConfig({}));
-    m.getOrCreateSession("s1", "planner");
-    assert.equal(m.getSession("s1")!.stage, "execution");
-    // Pre-consume 12 ordinary tools so the designated write itself is the
-    // 13th success, which crosses the transition threshold (15 - 2).
-    for (let i = 0; i < 12; i++) {
-      m.recordToolSuccess("s1", 0, "", `o${i}`, "edit");
-    }
-    // A successful designated-path write while execution is active is an
-    // ordinary call: it keeps ordinary accounting, may itself trigger the
-    // phase transition, and must not flip the one-time latch.
-    m.recordToolSuccess("s1", 0, "", "h0", "write", { filePath: handoverPath("s1") });
-    let s = m.getSession("s1")!;
-    assert.equal(s.stage, "finalization");
-    assert.equal(s.isHandoverWritten, false);
-    assert.equal(s.toolCount, 13);
-    assert.equal(s.toolCallsSucceeded, 13);
-    assert.equal(s.finalizationToolsUsed, 0);
-    // Once in finalization, the hatch is still offered: the designated path
-    // remains permitted and the status surface still reports it as available.
-    assert.equal(
-      m.isOperationPermittedInFinalization("s1", "write", { filePath: handoverPath("s1") }),
-      true,
-    );
-    assert.equal(m.getRemainingBudget("s1")!.isHandoverWritten, false);
-    // A successful finalization-stage handover consumes the hatch exactly
-    // once without consuming a finalization slot.
-    m.recordToolSuccess("s1", 10, "handover body", "h1", "write", {
-      filePath: handoverPath("s1"),
-    });
-    s = m.getSession("s1")!;
-    assert.equal(s.isHandoverWritten, true);
-    assert.equal(s.finalizationToolsUsed, 0);
-    // Exactly once: a further designated attempt blocks.
-    assert.equal(
-      m.isOperationPermittedInFinalization("s1", "write", { filePath: handoverPath("s1") }),
-      false,
-    );
   });
 });
 
