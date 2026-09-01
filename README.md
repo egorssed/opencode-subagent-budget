@@ -106,19 +106,11 @@ When no options are provided, the plugin enforces the following per-agent budget
 | Agent | `maxTools` | `maxTokens` | `finalization.allowedTools` | `whitelistedTools` | `finalizationRemaining` |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `web-researcher` | 9 | 24000 | — | — | — |
-| `unbiased-collector` | 14 | 48000 | — | — | — |
 | `file-explorer` | 15 | 50000 | — | `lsp` | — |
-| `hoare-spec-formalizer` | 4 | 10000 | — | — | — |
-| `hoare-checks` | 10 | 18000 | — | — | — |
-| `hoare-planner` | 4 | 12000 | — | — | — |
-| `hoare-plan-verifier` | 5 | 12000 | — | — | — |
-| `hoare-impl-verifier` | 12 | 24000 | — | — | — |
 | `code-reviewer` | 12 | 18000 | — | `lsp` | — |
-| `security-reviewer` | 14 | 24000 | — | `lsp` | — |
 | `planner` | 15 | 18000 | `write`, `edit`, `apply_patch` | `lsp` | 2 |
 | `doc-writer` | 10 | 10000 | `write`, `edit`, `apply_patch` | `lsp` | 2 |
 | `coder` | 24 | 48000 | `write`, `edit`, `apply_patch` | `context7*`, `task`, `lsp` | 3 |
-| `test-builder` | 1 | 4000 | — | — | — |
 
 Explicit tuple options override the baked budgets per field: e.g. `agents.coder { "maxTools": 5 }` lowers `maxTools` to 5 while `maxTokens` stays 48000. Agents not in the table are exempt from guarding entirely.
 
