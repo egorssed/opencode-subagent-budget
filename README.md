@@ -6,11 +6,11 @@ An [OpenCode](https://opencode.ai) plugin that guards sub-agent capacity, enforc
 
 - **Two-stage lifecycle**: sessions move one-way from `execution` to `finalization` when any limit is breached.
 - **Dual-metric tracking**: cumulative tool invocations and estimated ingested context tokens, isolated per `sessionID`.
-- **Primary-agent exemption**: `build`, `plan`, and `orchestrator` are unconstrained by default; per-agent overrides can assign custom budgets.
+- **Configured-agent guard**: only agents with an explicit, enabled capacity profile are restricted; unconfigured and unnamed agents are exempt by default, and per-agent overrides can assign custom budgets.
 - **Finalization whitelist**: permit specific tools (and optionally specific file paths) once a budget is exhausted.
 - **Transparent feedback**: interception errors explain which limit was hit, and live budget status is injected into the system prompt.
 - **Hierarchical config**: global defaults → per-agent overrides → environment variables.
-- **Zero runtime dependencies**: executes natively as TypeScript under OpenCode's Bun-based plugin runtime.
+- **BPE token estimation**: accurate per-session token budgets with bounded-cost counting for large tool outputs.
 
 ## Installation
 
@@ -140,8 +140,8 @@ Explicit tuple options override the baked budgets per field: e.g. `agents.coder 
 
 - On `chat.params`, the plugin records the agent for the incoming session.
 - On `tool.execute.before`, it records the attempt and — if the session has entered `finalization` — blocks any tool not permitted by `finalization.allowedTools`/`allowedPaths` with a structured `CapacityLimitError`.
-- On `tool.execute.after`, it accumulates the tool count and estimates ingested tokens (input args + output text, ~4 chars/token), transitioning the session to `finalization` when either limit is reached.
-- Live budget status is injected into the system prompt via `experimental.chat.system.transform`.
+- On `tool.execute.after`, it accumulates the tool count and BPE-based token estimate (input args + output text), transitioning the session to `finalization` when either limit is reached.
+- Live budget status is injected into the system prompt and appended to successful tool results.
 
 ### Counting whitelist (`whitelistedTools`)
 
