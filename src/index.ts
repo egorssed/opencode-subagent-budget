@@ -29,6 +29,29 @@ export const server: Plugin = async (
     }
   };
 
+  // Single source of truth for the [capacity-guard] status line, shared by
+  // the system-prompt header and post-tool refreshes.
+  const formatCapacityStatus = (
+    budget: NonNullable<ReturnType<SessionStateManager["getRemainingBudget"]>>,
+  ): string => {
+    let line = `[capacity-guard] tools: ${budget.toolCount}/${budget.maxTools} (${budget.remainingTools} remaining); tokens: ${budget.tokensIngested}/${budget.maxTokens} (~${budget.remainingTokens} remaining); stage: ${budget.stage}`;
+
+    // Bounded finalization: extend the status line only while the cap is
+    // configured and the session is in finalization, with reference-style
+    // wrap-up notices at phase entry and when exactly one call remains.
+    const cap = budget.finalizationRemaining;
+    if (budget.stage === "finalization" && cap !== undefined) {
+      const used = budget.finalizationToolsUsed;
+      line += `; finalization: ${used}/${cap} used`;
+      if (used === 0) {
+        line += ` ⚠️ FORCEFUL WRAP-UP: You have exactly ${cap} finalization call(s) remaining. Stop exploring and start producing your deliverable immediately.`;
+      } else if (used === cap - 1) {
+        line += ` 🚨 LAST CALL: This is your FINAL tool call. You must produce your deliverable NOW.`;
+      }
+    }
+    return line;
+  };
+
   return {
     "chat.params": async (input) => {
       sessionAgent.set(input.sessionID, input.agent);
@@ -88,6 +111,19 @@ export const server: Plugin = async (
         input.tool,
         (input.args ?? hookOutput.args ?? {}) as Record<string, unknown>,
       );
+
+      // Post-tool refresh: surface the updated counters to the model by
+      // appending to the tool result (accounting above already consumed the
+      // original output, so the appended line does not count toward the
+      // budget).
+      const budget = stateManager.getRemainingBudget(input.sessionID);
+      if (
+        budget &&
+        String(input.tool ?? "") !== "todowrite" &&
+        typeof hookOutput.output === "string"
+      ) {
+        hookOutput.output += `\n${formatCapacityStatus(budget)}`;
+      }
     },
 
     event: async (input) => {
@@ -126,23 +162,7 @@ export const server: Plugin = async (
       const budget = stateManager.getRemainingBudget(sessionID);
       if (!budget) return;
 
-      let line = `[capacity-guard] tools: ${budget.toolCount}/${budget.maxTools} (${budget.remainingTools} remaining); tokens: ${budget.tokensIngested}/${budget.maxTokens} (~${budget.remainingTokens} remaining); stage: ${budget.stage}`;
-
-      // Bounded finalization: extend the status line only while the cap is
-      // configured and the session is in finalization, with reference-style
-      // wrap-up notices at phase entry and when exactly one call remains.
-      const cap = budget.finalizationRemaining;
-      if (budget.stage === "finalization" && cap !== undefined) {
-        const used = budget.finalizationToolsUsed;
-        line += `; finalization: ${used}/${cap} used`;
-        if (used === 0) {
-          line += ` ⚠️ FORCEFUL WRAP-UP: You have exactly ${cap} finalization call(s) remaining. Stop exploring and start producing your deliverable immediately.`;
-        } else if (used === cap - 1) {
-          line += ` 🚨 LAST CALL: This is your FINAL tool call. You must produce your deliverable NOW.`;
-        }
-      }
-
-      output.system.push(line);
+      output.system.push(formatCapacityStatus(budget));
     },
   };
 };
