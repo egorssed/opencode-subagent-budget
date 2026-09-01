@@ -224,13 +224,13 @@ describe("token estimation and payload extraction", () => {
     assert.equal(estimateTokens(""), 0);
   });
 
-  test("~4 chars per token with ceiling", () => {
+  test("exact token counting up to the sample limit", () => {
     assert.equal(estimateTokens("abcd"), 1);
     assert.equal(estimateTokens("abcde"), 2);
-    assert.equal(estimateTokens("a".repeat(100)), 25);
+    assert.equal(estimateTokens("a".repeat(100)), 13);
   });
 
-  test("12000 chars estimate ~3000 tokens", () => {
+  test("degenerate repeated run falls back to ceil(length / 4)", () => {
     assert.equal(estimateTokens("a".repeat(12000)), 3000);
   });
 
@@ -299,7 +299,7 @@ describe("token estimation and payload extraction", () => {
   test("structured output counts text content only", () => {
     assert.equal(
       estimateToolOutputTokens({ output: "a".repeat(400), extra: "x".repeat(4000) }),
-      100,
+      50,
     );
   });
 
@@ -382,7 +382,7 @@ describe("SessionStateManager lifecycle", () => {
     );
     m.getOrCreateSession("s1", "explore");
     m.recordToolExecution("s1", "a".repeat(400));
-    assert.equal(m.getSession("s1")!.tokensIngested, 100);
+    assert.equal(m.getSession("s1")!.tokensIngested, 50);
     assert.equal(m.getSession("s1")!.toolCount, 1);
   });
 
@@ -423,8 +423,8 @@ describe("SessionStateManager lifecycle", () => {
     m.recordToolExecution("s1", "a".repeat(40));
     const budget = m.getRemainingBudget("s1")!;
     assert.equal(budget.remainingTools, 4);
-    assert.equal(budget.tokensIngested, 10);
-    assert.equal(budget.remainingTokens, 90);
+    assert.equal(budget.tokensIngested, 5);
+    assert.equal(budget.remainingTokens, 95);
     assert.equal(budget.exempt, false);
     assert.equal(budget.stage, "execution");
     assert.equal(m.getRemainingBudget("unknown"), undefined);
@@ -812,7 +812,7 @@ describe("plugin server hooks", () => {
 
   test("after-hook estimates tokens from structured output", async () => {
     const hooks = await server({} as unknown as PluginInput, makeConfig({
-      defaults: { maxTools: 99, maxTokens: 100 },
+      defaults: { maxTools: 99, maxTokens: 40 },
       agents: { explore: { enabled: true } },
     }) as unknown as PluginOptions);
     await callHook(hooks["chat.params"], { sessionID: "sT", agent: "explore" });
@@ -1123,8 +1123,8 @@ describe("whitelisted tool accounting", () => {
     assert.equal(s.toolCallsSucceeded, 1);
     assert.equal(s.toolCount, 0);
     assert.equal(s.tokensInput, 30);
-    assert.equal(s.tokensOutput, 100);
-    assert.equal(s.tokensIngested, 130);
+    assert.equal(s.tokensOutput, 50);
+    assert.equal(s.tokensIngested, 80);
   });
 
   test("non-whitelisted success still increments toolCount", () => {
@@ -1933,7 +1933,7 @@ describe("T009 input/payload and output token accounting", () => {
     m.recordToolSuccess("s1", estimateArgsTokens(args), "a".repeat(400));
     const s = m.getSession("s1")!;
     assert.equal(s.tokensInput, estimateArgsTokens(args));
-    assert.equal(s.tokensOutput, 100);
+    assert.equal(s.tokensOutput, 50);
     assert.equal(s.tokensIngested, s.tokensInput + s.tokensOutput);
     assert.equal(s.toolCallsSucceeded, 1);
   });
@@ -2324,20 +2324,20 @@ describe("provider token ground truth accounting", () => {
     m.getOrCreateSession("s2", "custom");
     m.recordProviderTokens("s2", "m1", 1000);
     m.recordProviderTokens("s2", "m2", 3000);
-    // "a".repeat(400) ≈ 100 tokens per the estimator.
+    // "a".repeat(400) ≈ 50 tokens per the estimator.
     m.recordToolSuccess("s2", 0, "a".repeat(400));
-    assert.equal(m.getSession("s2")!.tokensIngested, 2100);
+    assert.equal(m.getSession("s2")!.tokensIngested, 2050);
     // A second cycle against the same latest is not cumulative: only the last
     // call's estimate is added, matching reference parity.
     m.recordToolSuccess("s2", 0, "a".repeat(400));
-    assert.equal(m.getSession("s2")!.tokensIngested, 2100);
+    assert.equal(m.getSession("s2")!.tokensIngested, 2050);
   });
 
   test("heuristic fallback without provider observations", () => {
     const m = new SessionStateManager(makeConfig(bigConfig));
     m.getOrCreateSession("s3", "custom");
     m.recordToolSuccess("s3", 30, "a".repeat(400));
-    assert.equal(m.getSession("s3")!.tokensIngested, 130);
+    assert.equal(m.getSession("s3")!.tokensIngested, 80);
   });
 
   test("provider growth drives token_limit finalization on the next tool success", () => {
@@ -2398,8 +2398,8 @@ describe("event hook plumbing (provider token sync)", () => {
       { sessionID: "sE", model: "m" },
       { system },
     );
-    // Provider delta (3500 - 1500 = 2000) plus the last output estimate (~100).
-    assert.ok(system[0]!.includes("tokens: 2100/18000"));
+    // Provider delta (3500 - 1500 = 2000) plus the last output estimate (~50).
+    assert.ok(system[0]!.includes("tokens: 2050/18000"));
   });
 
   test("event hook is not registered when the guard is disabled", async () => {

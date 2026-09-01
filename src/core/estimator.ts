@@ -1,7 +1,11 @@
 import fs from "node:fs/promises";
+import { countTokens } from "gpt-tokenizer";
 
 export const EXACT_COUNT_THRESHOLD = 1 * 1024 * 1024;
 export const SAMPLE_SIZE = 8192;
+
+const EXACT_SAMPLE_LIMIT = 128 * 1024;
+const DEGENERATE_RUN = 2048;
 
 export function countNewlines(text: string): number {
   let count = 0;
@@ -52,8 +56,33 @@ export async function estimatePatchSize(
   return Math.round(patchRatio * fileSize);
 }
 
+function hasDegenerateRun(text: string): boolean {
+  let runLength = 0;
+  let prev: string | undefined;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === prev) {
+      runLength++;
+    } else {
+      prev = ch;
+      runLength = 1;
+    }
+    if (runLength > DEGENERATE_RUN) return true;
+  }
+  return false;
+}
+
 export function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
+  if (text.length === 0) return 0;
+  const sample =
+    text.length <= EXACT_SAMPLE_LIMIT
+      ? text
+      : text.slice(0, EXACT_SAMPLE_LIMIT);
+  if (hasDegenerateRun(sample)) return Math.ceil(text.length / 4);
+  const sampled = countTokens(sample);
+  return sample.length === text.length
+    ? sampled
+    : Math.ceil((sampled / sample.length) * text.length);
 }
 
 export function extractOutputText(output: unknown): string {

@@ -33,5 +33,8 @@
     "@opencode-ai/plugin": "latest",
     "@types/node": "^20.0.0",
     "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "gpt-tokenizer": "^4.0.0"
   }
 }
