@@ -55,7 +55,6 @@ The plugin accepts an optional options tuple in `opencode.jsonc`:
   "plugin": [
     ["opencode-context-guard", {
       "enabled": true,
-      "primaryAgents": ["build", "plan", "orchestrator"],
       "defaults": {
         "maxTools": 15,
         "maxTokens": 40000,
@@ -86,12 +85,13 @@ The plugin accepts an optional options tuple in `opencode.jsonc`:
 }
 ```
 
+Only agents listed in `agents` are guarded: agent names absent from `agents` are exempt, and profiles with `enabled: false` are exempt.
+
 ### Options
 
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `enabled` | `boolean` | `true` | Global toggle for capacity guarding. |
-| `primaryAgents` | `string[]` | `["build", "plan", "orchestrator"]` | Agents exempt from capacity limits by default. |
 | `defaults.maxTools` | `number` | `15` | Default maximum cumulative tool invocations. |
 | `defaults.maxTokens` | `number` | `40000` | Default maximum ingested context tokens. |
 | `defaults.finalization` | `object` | `{ "allowedTools": [], "allowedPaths": [] }` | Tools/paths permitted once in `finalization`. |
@@ -120,7 +120,7 @@ When no options are provided, the plugin enforces the following per-agent budget
 | `coder` | 24 | 48000 | `write`, `edit`, `apply_patch` | `context7*`, `task`, `lsp` | 3 |
 | `test-builder` | 1 | 4000 | — | — | — |
 
-Explicit tuple options override the baked budgets per field: e.g. `agents.coder { "maxTools": 5 }` lowers `maxTools` to 5 while `maxTokens` stays 48000. Agents not in the table keep using `defaults`.
+Explicit tuple options override the baked budgets per field: e.g. `agents.coder { "maxTools": 5 }` lowers `maxTools` to 5 while `maxTokens` stays 48000. Agents not in the table are exempt from guarding entirely.
 
 ### Environment variables
 
@@ -129,7 +129,6 @@ Explicit tuple options override the baked budgets per field: e.g. `agents.coder 
 | `OPENCODE_CONTEXT_GUARD_ENABLED` | Overrides `enabled` (`true`/`false`). |
 | `OPENCODE_CONTEXT_GUARD_DEFAULT_MAX_TOOLS` | Overrides `defaults.maxTools` (accepts `Infinity` for unlimited). |
 | `OPENCODE_CONTEXT_GUARD_DEFAULT_MAX_TOKENS` | Overrides `defaults.maxTokens` (accepts `Infinity` for unlimited). |
-| `OPENCODE_CONTEXT_GUARD_PRIMARY_AGENTS` | Comma-separated list overriding `primaryAgents`. |
 
 ### Precedence
 

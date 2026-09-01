@@ -26,7 +26,6 @@ const ENV_KEYS = [
   "OPENCODE_CONTEXT_GUARD_ENABLED",
   "OPENCODE_CONTEXT_GUARD_DEFAULT_MAX_TOOLS",
   "OPENCODE_CONTEXT_GUARD_DEFAULT_MAX_TOKENS",
-  "OPENCODE_CONTEXT_GUARD_PRIMARY_AGENTS",
 ] as const;
 
 function withEnv(entries: Record<string, string>, fn: () => void): void {
@@ -199,30 +198,16 @@ describe("resolveConfig hierarchical resolution", () => {
     });
   });
 
-  test("env primary agents list parsed", () => {
-    withEnv({ OPENCODE_CONTEXT_GUARD_PRIMARY_AGENTS: "arch, reviewer" }, () => {
-      assert.deepEqual(resolveConfig().primaryAgents, ["arch", "reviewer"]);
-    });
-  });
-
-  test("explicit primaryAgents win over env", () => {
-    withEnv({ OPENCODE_CONTEXT_GUARD_PRIMARY_AGENTS: "arch" }, () => {
-      assert.deepEqual(makeConfig({ primaryAgents: ["build"] }).primaryAgents, ["build"]);
-    });
-  });
-
   test("invalid env values fall back to defaults", () => {
     withEnv(
       {
         OPENCODE_CONTEXT_GUARD_ENABLED: "banana",
         OPENCODE_CONTEXT_GUARD_DEFAULT_MAX_TOOLS: "abc",
-        OPENCODE_CONTEXT_GUARD_PRIMARY_AGENTS: "",
       },
       () => {
         const config = resolveConfig();
         assert.equal(config.enabled, true);
         assert.equal(config.defaults.maxTools, 15);
-        assert.deepEqual(config.primaryAgents, ["build", "plan", "orchestrator"]);
       },
     );
   });
@@ -357,7 +342,9 @@ describe("SessionStateManager lifecycle", () => {
   });
 
   test("tool threshold transitions at exact limit", () => {
-    const m = new SessionStateManager(makeConfig({ defaults: { maxTools: 3, maxTokens: 1000 } }));
+    const m = new SessionStateManager(
+      makeConfig({ defaults: { maxTools: 3, maxTokens: 1000 }, agents: { explore: { enabled: true } } }),
+    );
     m.getOrCreateSession("s1", "explore");
     m.recordToolExecution("s1", "");
     m.recordToolExecution("s1", "");
@@ -368,7 +355,9 @@ describe("SessionStateManager lifecycle", () => {
   });
 
   test("token threshold transitions at exact limit", () => {
-    const m = new SessionStateManager(makeConfig({ defaults: { maxTools: 99, maxTokens: 100 } }));
+    const m = new SessionStateManager(
+      makeConfig({ defaults: { maxTools: 99, maxTokens: 100 }, agents: { explore: { enabled: true } } }),
+    );
     m.getOrCreateSession("s1", "explore");
     m.recordTokens("s1", 99);
     assert.equal(m.getSession("s1")!.stage, "execution");
@@ -378,7 +367,9 @@ describe("SessionStateManager lifecycle", () => {
   });
 
   test("overshoot token ingestion finalizes", () => {
-    const m = new SessionStateManager(makeConfig({ defaults: { maxTokens: 2000 } }));
+    const m = new SessionStateManager(
+      makeConfig({ defaults: { maxTokens: 2000 }, agents: { explore: { enabled: true } } }),
+    );
     m.getOrCreateSession("s1", "explore");
     m.recordTokens("s1", 3000);
     assert.equal(m.getSession("s1")!.stage, "finalization");
@@ -415,7 +406,9 @@ describe("SessionStateManager lifecycle", () => {
   });
 
   test("manual transition does not downgrade existing reason", () => {
-    const m = new SessionStateManager(makeConfig({ defaults: { maxTools: 1 } }));
+    const m = new SessionStateManager(
+      makeConfig({ defaults: { maxTools: 1 }, agents: { explore: { enabled: true } } }),
+    );
     m.getOrCreateSession("s1", "explore");
     m.recordToolExecution("s1", "");
     m.transitionToFinalization("s1", "manual");
@@ -423,7 +416,9 @@ describe("SessionStateManager lifecycle", () => {
   });
 
   test("getRemainingBudget reports remaining metrics", () => {
-    const m = new SessionStateManager(makeConfig({ defaults: { maxTools: 5, maxTokens: 100 } }));
+    const m = new SessionStateManager(
+      makeConfig({ defaults: { maxTools: 5, maxTokens: 100 }, agents: { explore: { enabled: true } } }),
+    );
     m.getOrCreateSession("s1", "explore");
     m.recordToolExecution("s1", "a".repeat(40));
     const budget = m.getRemainingBudget("s1")!;
@@ -436,7 +431,9 @@ describe("SessionStateManager lifecycle", () => {
   });
 
   test("sessions are isolated per sessionID", () => {
-    const m = new SessionStateManager(makeConfig({ defaults: { maxTools: 1 } }));
+    const m = new SessionStateManager(
+      makeConfig({ defaults: { maxTools: 1 }, agents: { explore: { enabled: true } } }),
+    );
     m.getOrCreateSession("a", "explore");
     m.getOrCreateSession("b", "explore");
     m.recordToolExecution("a", "");
@@ -445,14 +442,22 @@ describe("SessionStateManager lifecycle", () => {
   });
 
   test("per-session config overrides global config", () => {
-    const m = new SessionStateManager(makeConfig({ defaults: { maxTools: 5 } }));
-    m.getOrCreateSession("s1", "explore", makeConfig({ defaults: { maxTools: 1 } }));
+    const m = new SessionStateManager(
+      makeConfig({ defaults: { maxTools: 5 }, agents: { explore: { enabled: true } } }),
+    );
+    m.getOrCreateSession(
+      "s1",
+      "explore",
+      makeConfig({ defaults: { maxTools: 1 }, agents: { explore: { enabled: true } } }),
+    );
     m.recordToolExecution("s1", "");
     assert.equal(m.getSession("s1")!.stage, "finalization");
   });
 
   test("default config guards at 15 tools", () => {
-    const m = new SessionStateManager();
+    const m = new SessionStateManager(
+      makeConfig({ defaults: { maxTools: 15, maxTokens: 40000 }, agents: { explore: { enabled: true } } }),
+    );
     m.getOrCreateSession("s1", "explore");
     for (let i = 0; i < 14; i++) m.recordToolExecution("s1", "");
     assert.equal(m.getSession("s1")!.stage, "execution");
@@ -662,17 +667,12 @@ describe("finalization whitelist enforcement", () => {
 });
 
 describe("primary agent exemption", () => {
-  test("primary agent never transitions", () => {
+  test("unconfigured agent remains exempt and never transitions", () => {
     const m = new SessionStateManager(makeConfig({ defaults: { maxTools: 1, maxTokens: 10 } }));
-    m.getOrCreateSession("s1", "build");
+    m.getOrCreateSession("s1", "fixture-untracked");
     for (let i = 0; i < 25; i++) m.recordToolExecution("s1", "x".repeat(1000));
     assert.equal(m.getSession("s1")!.stage, "execution");
     assert.equal(m.getSession("s1")!.toolCount, 25);
-  });
-
-  test("primary agent budget is infinite", () => {
-    const m = new SessionStateManager(makeConfig({ defaults: { maxTools: 3, maxTokens: 100 } }));
-    m.getOrCreateSession("s1", "build");
     const budget = m.getRemainingBudget("s1")!;
     assert.equal(budget.exempt, true);
     assert.equal(budget.maxTools, Infinity);
@@ -681,28 +681,51 @@ describe("primary agent exemption", () => {
     assert.equal(budget.remainingTokens, Infinity);
   });
 
-  test("isAgentExempt true for primary and explicitly disabled agents", () => {
-    const m = new SessionStateManager(makeConfig({ agents: { legacy: { enabled: false } } }));
-    assert.equal(m.isAgentExempt("build"), true);
-    assert.equal(m.isAgentExempt("plan"), true);
-    assert.equal(m.isAgentExempt("legacy"), true);
-    assert.equal(m.isAgentExempt("explore"), false);
-  });
-
-  test("explicitly disabled non-primary agent stays exempt", () => {
+  test("explicitly configured agent is guarded", () => {
     const m = new SessionStateManager(
-      makeConfig({ agents: { legacy: { enabled: false, maxTools: 1 } } }),
+      makeConfig({
+        defaults: { maxTokens: 10 },
+        agents: { "fixture-tracked": { enabled: true, maxTools: 1 } },
+      }),
     );
-    m.getOrCreateSession("s1", "legacy");
-    m.recordToolExecution("s1", "x");
-    assert.equal(m.getSession("s1")!.stage, "execution");
+    const s = m.getOrCreateSession("s1", "fixture-tracked");
+    m.recordToolSuccess("s1", 0, "");
+    m.recordToolSuccess("s1", 0, "");
+    assert.equal(s.stage, "finalization");
+    assert.equal(s.exhaustionReason, "tool_limit");
+    const budget = m.getRemainingBudget("s1")!;
+    assert.equal(budget.exempt, false);
+    assert.equal(budget.maxTools, 1);
   });
 
-  test("primary agent permitted even when manually finalized", () => {
+  test("isAgentExempt reflects explicit configuration", () => {
+    const m = new SessionStateManager(
+      makeConfig({
+        agents: {
+          "fixture-disabled": { enabled: false },
+          "fixture-enabled": { enabled: true },
+        },
+      }),
+    );
+    assert.equal(m.isAgentExempt("fixture-untracked"), true);
+    assert.equal(m.isAgentExempt("fixture-disabled"), true);
+    assert.equal(m.isAgentExempt("fixture-enabled"), false);
+  });
+
+  test("explicitly disabled agent stays exempt", () => {
+    const m = new SessionStateManager(
+      makeConfig({ agents: { "fixture-disabled": { enabled: false, maxTools: 1 } } }),
+    );
+    const s = m.getOrCreateSession("s1", "fixture-disabled");
+    m.recordToolExecution("s1", "x");
+    assert.equal(s.stage, "execution");
+  });
+
+  test("exempt agent permitted even when manually finalized", () => {
     const m = new SessionStateManager(
       makeConfig({ defaults: { maxTools: 1, finalization: { allowedTools: [] } } }),
     );
-    m.getOrCreateSession("s1", "build");
+    m.getOrCreateSession("s1", "fixture-untracked");
     m.transitionToFinalization("s1", "manual");
     assert.equal(m.isOperationPermittedInFinalization("s1", "bash", {}), true);
     assert.doesNotThrow(() => m.assertOperationPermitted("s1", "bash", {}));
@@ -725,6 +748,7 @@ describe("plugin server hooks", () => {
   test("scenario B: 4th tool call blocked at tool limit", async () => {
     const hooks = await server({} as unknown as PluginInput, makeConfig({
       defaults: { maxTools: 3, maxTokens: 10000 },
+      agents: { general: { enabled: true } },
     }) as unknown as PluginOptions);
     await callHook(hooks["chat.params"], { sessionID: "sB", agent: "general" });
     for (let i = 0; i < 3; i++) {
@@ -740,6 +764,7 @@ describe("plugin server hooks", () => {
   test("scenario C: token exhaustion blocks next call", async () => {
     const hooks = await server({} as unknown as PluginInput, makeConfig({
       defaults: { maxTokens: 2000, maxTools: 99 },
+      agents: { explore: { enabled: true } },
     }) as unknown as PluginOptions);
     await callHook(hooks["chat.params"], { sessionID: "sC", agent: "explore" });
     await callHook(hooks["tool.execute.after"], { sessionID: "sC" }, { output: "a".repeat(12000) });
@@ -788,6 +813,7 @@ describe("plugin server hooks", () => {
   test("after-hook estimates tokens from structured output", async () => {
     const hooks = await server({} as unknown as PluginInput, makeConfig({
       defaults: { maxTools: 99, maxTokens: 100 },
+      agents: { explore: { enabled: true } },
     }) as unknown as PluginOptions);
     await callHook(hooks["chat.params"], { sessionID: "sT", agent: "explore" });
     await callHook(hooks["tool.execute.after"], { sessionID: "sT" }, { output: { output: "a".repeat(400) } });
@@ -815,20 +841,21 @@ describe("plugin server hooks", () => {
   });
 });
 
-describe("T007 explicit profiles override primary exemption", () => {
-  test("primary agent without profile stays exempt", () => {
+describe("T007 config-driven exemption", () => {
+  test("agent without a profile stays exempt", () => {
     const m = new SessionStateManager(makeConfig({}));
-    assert.equal(m.isAgentExempt("build"), true);
-    assert.equal(m.isAgentExempt("plan"), true);
-    assert.equal(m.isAgentExempt("orchestrator"), true);
+    assert.equal(m.isAgentExempt("fixture-untracked"), true);
+    const s = m.getOrCreateSession("s1", "fixture-untracked");
+    for (let i = 0; i < 25; i++) m.recordToolSuccess("s1", 0, "x".repeat(1000));
+    assert.equal(s.stage, "execution");
   });
 
-  test("explicit enabled:true profile constrains a primary agent", () => {
+  test("explicit enabled:true profile guards an agent", () => {
     const m = new SessionStateManager(
-      makeConfig({ agents: { build: { enabled: true, maxTools: 2 } } }),
+      makeConfig({ agents: { "fixture-guarded": { enabled: true, maxTools: 2, maxTokens: 5000 } } }),
     );
-    assert.equal(m.isAgentExempt("build"), false);
-    const s = m.getOrCreateSession("s1", "build");
+    assert.equal(m.isAgentExempt("fixture-guarded"), false);
+    const s = m.getOrCreateSession("s1", "fixture-guarded");
     m.recordToolSuccess("s1", 0, "");
     m.recordToolSuccess("s1", 0, "");
     assert.equal(s.stage, "finalization");
@@ -836,13 +863,13 @@ describe("T007 explicit profiles override primary exemption", () => {
     const budget = m.getRemainingBudget("s1")!;
     assert.equal(budget.exempt, false);
     assert.equal(budget.maxTools, 2);
-    assert.equal(budget.maxTokens, 40000);
+    assert.equal(budget.maxTokens, 5000);
   });
 
-  test("explicit enabled:false keeps primary exemption", () => {
-    const m = new SessionStateManager(makeConfig({ agents: { build: { enabled: false } } }));
-    assert.equal(m.isAgentExempt("build"), true);
-    const s = m.getOrCreateSession("s1", "build");
+  test("explicit enabled:false keeps an agent exempt", () => {
+    const m = new SessionStateManager(makeConfig({ agents: { "fixture-disabled": { enabled: false } } }));
+    assert.equal(m.isAgentExempt("fixture-disabled"), true);
+    const s = m.getOrCreateSession("s1", "fixture-disabled");
     for (let i = 0; i < 25; i++) m.recordToolSuccess("s1", 0, "x".repeat(1000));
     assert.equal(s.stage, "execution");
   });
@@ -889,24 +916,24 @@ describe("T007 explicit profiles override primary exemption", () => {
     assert.equal(s.stage, "finalization");
   });
 
-  test("explicitly enabled primary agent obeys finalization whitelist", () => {
+  test("explicitly enabled agent obeys finalization whitelist", () => {
     const m = new SessionStateManager(
       makeConfig({
-        agents: { build: { enabled: true, maxTools: 1, finalization: { allowedTools: [] } } },
+        agents: { "fixture-guarded": { enabled: true, maxTools: 1, finalization: { allowedTools: [] } } },
       }),
     );
-    m.getOrCreateSession("s1", "build");
+    m.getOrCreateSession("s1", "fixture-guarded");
     m.transitionToFinalization("s1", "manual");
     assert.equal(m.isOperationPermittedInFinalization("s1", "bash", {}), false);
     assert.throws(() => m.assertOperationPermitted("s1", "bash", {}), CapacityLimitError);
   });
 
-  test("explicitly enabled primary agent blocked at hooks after limit", async () => {
+  test("explicitly enabled agent blocked at hooks after limit", async () => {
     const hooks = await server({} as unknown as PluginInput, makeConfig({
       defaults: { maxTools: 1, maxTokens: 10000 },
-      agents: { build: { enabled: true, maxTools: 1 } },
+      agents: { "fixture-guarded": { enabled: true, maxTools: 1 } },
     }) as unknown as PluginOptions);
-    await callHook(hooks["chat.params"], { sessionID: "sB", agent: "build" });
+    await callHook(hooks["chat.params"], { sessionID: "sB", agent: "fixture-guarded" });
     await callHook(hooks["tool.execute.before"], { sessionID: "sB", tool: "bash" }, { args: {} });
     await callHook(hooks["tool.execute.after"], { sessionID: "sB" }, { output: "" });
     await assert.rejects(
@@ -915,11 +942,11 @@ describe("T007 explicit profiles override primary exemption", () => {
     );
   });
 
-  test("hooks bypass exempt primary agents entirely", async () => {
+  test("hooks bypass agents without a profile entirely", async () => {
     const hooks = await server({} as unknown as PluginInput, makeConfig({
       defaults: { maxTools: 1, maxTokens: 10 },
     }) as unknown as PluginOptions);
-    await callHook(hooks["chat.params"], { sessionID: "sE", agent: "build" });
+    await callHook(hooks["chat.params"], { sessionID: "sE", agent: "fixture-untracked" });
     for (let i = 0; i < 25; i++) {
       await callHook(hooks["tool.execute.before"], { sessionID: "sE", tool: "bash" }, { args: {} });
       await callHook(hooks["tool.execute.after"], { sessionID: "sE" }, { output: "x".repeat(5000) });
@@ -950,7 +977,9 @@ describe("T007 explicit profiles override primary exemption", () => {
 
 describe("T008 attempted vs succeeded accounting", () => {
   test("successful cycles count attempted and succeeded exactly once", () => {
-    const m = new SessionStateManager(makeConfig({ defaults: { maxTools: 2, maxTokens: 10000 } }));
+    const m = new SessionStateManager(
+      makeConfig({ defaults: { maxTools: 2, maxTokens: 10000 }, agents: { worker: { enabled: true } } }),
+    );
     m.getOrCreateSession("s1", "worker");
     m.recordToolAttempt("s1");
     m.recordToolSuccess("s1", 0, "");
@@ -964,7 +993,9 @@ describe("T008 attempted vs succeeded accounting", () => {
   });
 
   test("blocked call counts as attempted only, no double-count", () => {
-    const m = new SessionStateManager(makeConfig({ defaults: { maxTools: 1, maxTokens: 10000 } }));
+    const m = new SessionStateManager(
+      makeConfig({ defaults: { maxTools: 1, maxTokens: 10000 }, agents: { worker: { enabled: true } } }),
+    );
     m.getOrCreateSession("s1", "worker");
     m.recordToolAttempt("s1");
     m.recordToolSuccess("s1", 0, "");
@@ -979,6 +1010,7 @@ describe("T008 attempted vs succeeded accounting", () => {
   test("hooks block call #maxTools+1 with contract message", async () => {
     const hooks = await server({} as unknown as PluginInput, makeConfig({
       defaults: { maxTools: 2, maxTokens: 10000 },
+      agents: { general: { enabled: true } },
     }) as unknown as PluginOptions);
     await callHook(hooks["chat.params"], { sessionID: "sB", agent: "general" });
     for (let i = 0; i < 2; i++) {
@@ -1232,6 +1264,7 @@ describe("whitelisted tool accounting", () => {
   test("hook plumbing: always-free todo*/skill pass through hooks without counting", async () => {
     const hooks = await server({} as unknown as PluginInput, makeConfig({
       defaults: { maxTools: 1, maxTokens: 99000 },
+      agents: { explore: { enabled: true } },
     }) as unknown as PluginOptions);
     await callHook(hooks["chat.params"], { sessionID: "sX", agent: "explore" });
     await callHook(hooks["tool.execute.after"], { sessionID: "sX", tool: "todowrite" }, { output: "" });
@@ -1482,6 +1515,7 @@ describe("bounded finalization (finalizationRemaining)", () => {
     const m = new SessionStateManager(
       makeConfig({
         defaults: { maxTools: 3, maxTokens: 99000, finalization: { allowedTools: ["read"] } },
+        agents: { explore: { enabled: true } },
       }),
     );
     m.getOrCreateSession("s1", "explore");
@@ -1511,6 +1545,7 @@ describe("bounded finalization (finalizationRemaining)", () => {
     // Unconfigured agents keep the legacy status line.
     const hooks = await server({} as unknown as PluginInput, makeConfig({
       defaults: { maxTools: 3, maxTokens: 99000, finalization: { allowedTools: ["read"] } },
+      agents: { explore: { enabled: true } },
     }) as unknown as PluginOptions);
     await callHook(hooks["chat.params"], { sessionID: "sL", agent: "explore" });
     for (let i = 0; i < 3; i++) {
@@ -1595,9 +1630,9 @@ describe("bounded finalization (finalizationRemaining)", () => {
   test("exempt agent with R > maxTools skips creation-time finalization", () => {
     const m = new SessionStateManager(
       makeConfig({
-        primaryAgents: ["boss"],
         agents: {
           boss: {
+            enabled: false,
             maxTools: 5,
             maxTokens: 40000,
             finalizationRemaining: 6,
@@ -1615,6 +1650,7 @@ describe("bounded finalization (finalizationRemaining)", () => {
 describe("callID idempotent accounting for duplicate hook delivery", () => {
   const hookConfig = {
     defaults: { maxTools: 99, maxTokens: 10_000_000 },
+    agents: { worker: { enabled: true } },
   } as ContextGuardOptions;
   const args = { query: "a".repeat(400) };
   const outputText = "b".repeat(400);
@@ -1720,6 +1756,7 @@ describe("callID idempotent accounting for duplicate hook delivery", () => {
   test("blocked call with a callID remains attempted-only", async () => {
     const hooks = await server({} as unknown as PluginInput, makeConfig({
       defaults: { maxTools: 1, maxTokens: 10_000_000 },
+      agents: { worker: { enabled: true } },
     }) as unknown as PluginOptions);
     await callHook(hooks["chat.params"], { sessionID: "sF", agent: "worker" });
     await callHook(
@@ -1914,6 +1951,7 @@ describe("T009 input/payload and output token accounting", () => {
   test("hooks account args and output toward the token budget", async () => {
     const hooks = await server({} as unknown as PluginInput, makeConfig({
       defaults: { maxTools: 99, maxTokens: 100 },
+      agents: { explore: { enabled: true } },
     }) as unknown as PluginOptions);
     await callHook(hooks["chat.params"], { sessionID: "sA", agent: "explore" });
     await callHook(
@@ -1932,6 +1970,7 @@ describe("T010 budget status surfacing", () => {
   test("constrained session receives deterministic status line", async () => {
     const hooks = await server({} as unknown as PluginInput, makeConfig({
       defaults: { maxTools: 15, maxTokens: 40000 },
+      agents: { explore: { enabled: true } },
     }) as unknown as PluginOptions);
     const args = { query: "a".repeat(400) };
     const outputText = "b".repeat(400);
@@ -1989,7 +2028,10 @@ describe("T010 budget status surfacing", () => {
   });
 
   test("injected line matches getRemainingBudget values", async () => {
-    const config = makeConfig({ defaults: { maxTools: 15, maxTokens: 40000 } });
+    const config = makeConfig({
+      defaults: { maxTools: 15, maxTokens: 40000 },
+      agents: { explore: { enabled: true } },
+    });
     const hooks = await server({} as unknown as PluginInput, config as unknown as PluginOptions);
     const args = { query: "a".repeat(400) };
     await callHook(hooks["chat.params"], { sessionID: "s1", agent: "explore" });
@@ -2019,6 +2061,7 @@ describe("T010 budget status surfacing", () => {
   test("sessions are isolated; each line reflects only its own budget", async () => {
     const hooks = await server({} as unknown as PluginInput, makeConfig({
       defaults: { maxTools: 15, maxTokens: 40000 },
+      agents: { explore: { enabled: true }, worker: { enabled: true } },
     }) as unknown as PluginOptions);
     await callHook(hooks["chat.params"], { sessionID: "sA", agent: "explore" });
     await callHook(hooks["chat.params"], { sessionID: "sB", agent: "worker" });
@@ -2066,7 +2109,10 @@ describe("T012 oversized payload full-volume accounting and fail-safe finalizati
 
   test("oversized output fully accounted; cap between old truncated and true volume finalizes", () => {
     const m = new SessionStateManager(
-      makeConfig({ defaults: { maxTools: 99, maxTokens: OLD_TRUNCATED_ESTIMATE + 1 } }),
+      makeConfig({
+        defaults: { maxTools: 99, maxTokens: OLD_TRUNCATED_ESTIMATE + 1 },
+        agents: { worker: { enabled: true } },
+      }),
     );
     m.getOrCreateSession("s1", "worker");
     m.recordToolSuccess("s1", 0, "x".repeat(OVERSIZED_CHARS));
@@ -2083,7 +2129,10 @@ describe("T012 oversized payload full-volume accounting and fail-safe finalizati
     assert.equal(argsTokens, estimateTokens(JSON.stringify(args)));
     assert.ok(argsTokens > OLD_TRUNCATED_ESTIMATE + 1);
     const m = new SessionStateManager(
-      makeConfig({ defaults: { maxTools: 99, maxTokens: OLD_TRUNCATED_ESTIMATE + 1 } }),
+      makeConfig({
+        defaults: { maxTools: 99, maxTokens: OLD_TRUNCATED_ESTIMATE + 1 },
+        agents: { worker: { enabled: true } },
+      }),
     );
     m.getOrCreateSession("s1", "worker");
     m.recordToolSuccess("s1", argsTokens, "");
@@ -2096,6 +2145,7 @@ describe("T012 oversized payload full-volume accounting and fail-safe finalizati
   test("oversized output through hooks finalizes and blocks the next call", async () => {
     const hooks = await server({} as unknown as PluginInput, makeConfig({
       defaults: { maxTools: 99, maxTokens: OLD_TRUNCATED_ESTIMATE + 1 },
+      agents: { explore: { enabled: true } },
     }) as unknown as PluginOptions);
     await callHook(hooks["chat.params"], { sessionID: "sH", agent: "explore" });
     await callHook(
@@ -2112,6 +2162,7 @@ describe("T012 oversized payload full-volume accounting and fail-safe finalizati
   test("oversized normal args through hooks finalize and block the next call", async () => {
     const hooks = await server({} as unknown as PluginInput, makeConfig({
       defaults: { maxTools: 99, maxTokens: OLD_TRUNCATED_ESTIMATE + 1 },
+      agents: { explore: { enabled: true } },
     }) as unknown as PluginOptions);
     await callHook(hooks["chat.params"], { sessionID: "sG", agent: "explore" });
     const args = { blob: "x".repeat(OVERSIZED_CHARS) };
@@ -2129,6 +2180,7 @@ describe("T012 oversized payload full-volume accounting and fail-safe finalizati
   test("large circular args reach the hook path, finalize, and block the next call", async () => {
     const hooks = await server({} as unknown as PluginInput, makeConfig({
       defaults: { maxTools: 99, maxTokens: 60_000 },
+      agents: { explore: { enabled: true } },
     }) as unknown as PluginOptions);
     await callHook(hooks["chat.params"], { sessionID: "sF", agent: "explore" });
     const circular: Record<string, unknown> = { blob: "x".repeat(OVERSIZED_CHARS) };
@@ -2158,6 +2210,7 @@ describe("T011 interceptor overhead benchmark", () => {
         maxTokens,
         finalization: { allowedTools: ["bash"], allowedPaths: [] },
       },
+      agents: { worker: { enabled: true } },
     }) as unknown as PluginOptions);
     const sessionID = "bench";
     const args = { cmd: "echo hi" };
@@ -2289,7 +2342,7 @@ describe("provider token ground truth accounting", () => {
 
   test("provider growth drives token_limit finalization on the next tool success", () => {
     const m = new SessionStateManager(
-      makeConfig({ defaults: { maxTools: 10_000_000, maxTokens: 1000 } }),
+      makeConfig({ defaults: { maxTools: 10_000_000, maxTokens: 1000 }, agents: { custom: { enabled: true } } }),
     );
     m.getOrCreateSession("s4", "custom");
     m.recordProviderTokens("s4", "m1", 1000);

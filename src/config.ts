@@ -80,7 +80,6 @@ const DEFAULT_DEFAULTS: ResolvedContextGuardConfig["defaults"] = {
 
 export const DEFAULT_CONFIG: ResolvedContextGuardConfig = {
   enabled: true,
-  primaryAgents: ["build", "plan", "orchestrator"],
   defaults: DEFAULT_DEFAULTS,
   agents: resolveBakedAgents(DEFAULT_DEFAULTS),
 };
@@ -88,7 +87,6 @@ export const DEFAULT_CONFIG: ResolvedContextGuardConfig = {
 const ENV_ENABLED = "OPENCODE_CONTEXT_GUARD_ENABLED";
 const ENV_DEFAULT_MAX_TOOLS = "OPENCODE_CONTEXT_GUARD_DEFAULT_MAX_TOOLS";
 const ENV_DEFAULT_MAX_TOKENS = "OPENCODE_CONTEXT_GUARD_DEFAULT_MAX_TOKENS";
-const ENV_PRIMARY_AGENTS = "OPENCODE_CONTEXT_GUARD_PRIMARY_AGENTS";
 
 function parseBool(value: string | undefined): boolean | undefined {
   if (value === undefined) return undefined;
@@ -112,15 +110,6 @@ function parsePositiveInt(value: string | undefined): number | undefined {
   return parsed;
 }
 
-function parseList(value: string | undefined): string[] | undefined {
-  if (value === undefined) return undefined;
-  const items = value
-    .split(",")
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0);
-  return items.length > 0 ? items : undefined;
-}
-
 function envEnabled(): boolean | undefined {
   return parseBool(process.env[ENV_ENABLED]);
 }
@@ -131,10 +120,6 @@ function envDefaultMaxTools(): number | undefined {
 
 function envDefaultMaxTokens(): number | undefined {
   return parsePositiveInt(process.env[ENV_DEFAULT_MAX_TOKENS]);
-}
-
-function envPrimaryAgents(): string[] | undefined {
-  return parseList(process.env[ENV_PRIMARY_AGENTS]);
 }
 
 function resolveFinalization(
@@ -235,7 +220,6 @@ export function resolveConfig(options?: PluginOptions): ResolvedContextGuardConf
 
   return {
     enabled: raw.enabled ?? envEnabled() ?? DEFAULT_CONFIG.enabled,
-    primaryAgents: raw.primaryAgents ?? envPrimaryAgents() ?? DEFAULT_CONFIG.primaryAgents,
     defaults,
     agents,
   };

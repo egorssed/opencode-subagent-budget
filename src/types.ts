@@ -14,7 +14,6 @@ declare global {
 
 export interface ContextGuardOptions {
   enabled?: boolean;
-  primaryAgents?: string[];
   defaults?: Partial<{
     maxTools: number;
     maxTokens: number;
@@ -44,7 +43,6 @@ export interface ResolvedAgentCapacityProfile {
 
 export interface ResolvedContextGuardConfig {
   enabled: boolean;
-  primaryAgents: string[];
   defaults: {
     maxTools: number;
     maxTokens: number;
@@ -103,7 +101,6 @@ export interface AgentCapacityProfile {
 
 export interface ContextGuardConfig {
   enabled: boolean;
-  primaryAgents: string[];
   defaults: {
     maxTools: number;
     maxTokens: number;

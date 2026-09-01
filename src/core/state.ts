@@ -304,16 +304,10 @@ export class SessionStateManager {
     agentName: string,
     config: ResolvedContextGuardConfig = this.config,
   ): boolean {
-    // Any profile with explicit enabled: false keeps its agent exempt,
-    // primary or not; normal non-primary agents remain guarded.
+    // Unconfigured agents are exempt; agents explicitly present in the
+    // resolved config are restricted unless their profile disables them.
     const profile = config.agents[agentName];
-    if (profile !== undefined && profile.enabled === false) return true;
-    // Primary agents are exempt unless an explicit enabled: true profile
-    // overrides the exemption.
-    return (
-      config.primaryAgents.includes(agentName) &&
-      profile?.enabledExplicit !== true
-    );
+    return profile === undefined || profile.enabled === false;
   }
 
   recordToolAttempt(sessionID: string, callID?: string): void {
