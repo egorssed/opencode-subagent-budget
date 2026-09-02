@@ -7,6 +7,8 @@ docs_opencode
 /.specify/templates/
 /.specify/workflows/
 /.specify/scripts/
+/.specify/presets/
+/.specify/**/*.json
 
 /.opencode/plugins/
 /.opencode/ocx.jsonc
