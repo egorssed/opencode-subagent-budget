@@ -153,6 +153,9 @@ function resolveAgentProfile(
   return {
     enabled: profile?.enabled ?? true,
     enabledExplicit: profile?.enabled === true,
+    // Only an explicit raw true opts the session into prompt replenishment;
+    // missing or false keeps counters cumulative across prompts.
+    replenishOnPrompt: profile?.replenishOnPrompt === true,
     maxTools: isPositiveInt(maxTools) ? maxTools : defaults.maxTools,
     maxTokens: isPositiveInt(maxTokens) ? maxTokens : defaults.maxTokens,
     finalization: resolveFinalization(defaults.finalization, profile?.finalization),
@@ -203,6 +206,7 @@ export function resolveConfig(options?: PluginOptions): ResolvedContextGuardConf
       agents[name] = resolveAgentProfile(
         {
           enabled: override.enabled ?? base.enabled,
+          replenishOnPrompt: override.replenishOnPrompt ?? base.replenishOnPrompt,
           maxTools: override.maxTools ?? base.maxTools,
           maxTokens: override.maxTokens ?? base.maxTokens,
           finalization: {

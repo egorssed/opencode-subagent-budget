@@ -32,6 +32,8 @@ export type WhitelistedToolEntry =
 export interface ResolvedAgentCapacityProfile {
   enabled: boolean;
   enabledExplicit: boolean;
+  /** True only when the raw profile explicitly sets replenishOnPrompt: true. */
+  replenishOnPrompt: boolean;
   maxTools: number;
   maxTokens: number;
   finalization: FinalizationPolicy;
@@ -92,6 +94,8 @@ export interface FinalizationPolicy {
 
 export interface AgentCapacityProfile {
   enabled?: boolean;
+  /** Reset the session budget on each new prompt; honored only when true. */
+  replenishOnPrompt?: boolean;
   maxTools?: number;
   maxTokens?: number;
   finalization?: Partial<FinalizationPolicy>;

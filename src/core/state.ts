@@ -271,6 +271,30 @@ export class SessionStateManager {
     return this.sessions.get(sessionID);
   }
 
+  /**
+   * Replenishes a session's budget for a new prompt: consumption counters and
+   * the exhaustion/stage state are reset to their fresh-session values while
+   * session identity, agent identity, creation metadata, subagent status,
+   * planning cache, and the per-session config are preserved. No-ops when no
+   * state exists for the session; callers gate on exemption and
+   * replenishOnPrompt before invoking.
+   */
+  resetBudgetForPrompt(sessionID: string): void {
+    const session = this.sessions.get(sessionID);
+    if (!session) return;
+    session.stage = "execution";
+    session.toolCount = 0;
+    session.tokensInput = 0;
+    session.tokensOutput = 0;
+    session.tokensIngested = 0;
+    session.baselineContextTokens = null;
+    session.latestContextTokens = null;
+    session.lastTokenMessageId = null;
+    session.finalizationToolsUsed = 0;
+    session.exhaustionReason = null;
+    session.lastActiveAt = Date.now();
+  }
+
   /** Diagnostic only: current retained callID dedup window sizes per session. */
   getDiagnosticCallIDCacheSizes(): {
     attemptedBySession: Record<string, number>;
@@ -294,6 +318,7 @@ export class SessionStateManager {
     return config.agents[agentName] ?? {
       enabled: true,
       enabledExplicit: false,
+      replenishOnPrompt: false,
       maxTools: config.defaults.maxTools,
       maxTokens: config.defaults.maxTokens,
       finalization: config.defaults.finalization,

@@ -96,6 +96,23 @@ describe("agent budget resolution and overrides", () => {
     assert.equal(config.agents.explore.maxTools, 3);
     assert.equal(config.agents.explore.maxTokens, 40000);
   });
+
+  test("replenishOnPrompt resolves true only for explicit raw true", () => {
+    const withTrue = makeConfig({ agents: { custom: { enabled: true, replenishOnPrompt: true } } });
+    assert.equal(withTrue.agents.custom.replenishOnPrompt, true);
+    const omitted = makeConfig({ agents: { custom: { enabled: true } } });
+    assert.equal(omitted.agents.custom.replenishOnPrompt, false);
+    const explicitFalse = makeConfig({ agents: { custom: { enabled: true, replenishOnPrompt: false } } });
+    assert.equal(explicitFalse.agents.custom.replenishOnPrompt, false);
+    assert.equal(DEFAULT_CONFIG.agents.coder.replenishOnPrompt, false);
+  });
+
+  test("baked merge preserves explicit replenishOnPrompt per-field", () => {
+    const enabled = makeConfig({ agents: { coder: { replenishOnPrompt: true } } });
+    assert.equal(enabled.agents.coder.replenishOnPrompt, true);
+    const untouched = makeConfig({ agents: { coder: {} } });
+    assert.equal(untouched.agents.coder.replenishOnPrompt, false);
+  });
 });
 
 describe("resolveConfig hierarchical resolution", () => {
@@ -133,6 +150,7 @@ describe("resolveConfig hierarchical resolution", () => {
     assert.deepEqual(config.agents.explore, {
       enabled: true,
       enabledExplicit: false,
+      replenishOnPrompt: false,
       maxTools: 3,
       maxTokens: 40000,
       finalization: { allowedTools: ["read"], allowedPaths: [] },
@@ -470,10 +488,57 @@ describe("SessionStateManager lifecycle", () => {
     assert.deepEqual(m.resolveProfile("ghost"), {
       enabled: true,
       enabledExplicit: false,
+      replenishOnPrompt: false,
       maxTools: 7,
       maxTokens: 500,
       finalization: { allowedTools: [], allowedPaths: [] },
     });
+  });
+
+  test("resetBudgetForPrompt replenishes counters and recovers finalization", () => {
+    const m = new SessionStateManager(
+      makeConfig({ defaults: { maxTools: 99, maxTokens: 100 }, agents: { explore: { enabled: true } } }),
+    );
+    m.getOrCreateSession("s1", "explore");
+    m.recordToolExecution("s1", "a".repeat(1200)); // 150 tokens > maxTokens 100
+    assert.equal(m.getSession("s1")!.stage, "finalization");
+    assert.equal(m.getSession("s1")!.exhaustionReason, "token_limit");
+    m.resetBudgetForPrompt("s1");
+    const s = m.getSession("s1")!;
+    assert.equal(s.stage, "execution");
+    assert.equal(s.toolCount, 0);
+    assert.equal(s.tokensInput, 0);
+    assert.equal(s.tokensOutput, 0);
+    assert.equal(s.tokensIngested, 0);
+    assert.equal(s.baselineContextTokens, null);
+    assert.equal(s.latestContextTokens, null);
+    assert.equal(s.lastTokenMessageId, null);
+    assert.equal(s.finalizationToolsUsed, 0);
+    assert.equal(s.exhaustionReason, null);
+    assert.equal(s.sessionID, "s1");
+    assert.equal(s.agentName, "explore");
+  });
+
+  test("resetBudgetForPrompt preserves planning cache subagent status and createdAt", () => {
+    const m = new SessionStateManager(
+      makeConfig({ defaults: { maxTools: 99, maxTokens: 1000 }, agents: { explore: { enabled: true } } }),
+    );
+    const s = m.getOrCreateSession("s1", "explore");
+    s.hasPlanned = true;
+    s.isSubagent = true;
+    const createdAt = s.createdAt;
+    m.recordToolExecution("s1", "x");
+    m.resetBudgetForPrompt("s1");
+    assert.equal(s.hasPlanned, true);
+    assert.equal(s.isSubagent, true);
+    assert.equal(s.createdAt, createdAt);
+    assert.equal(s.lastActiveAt >= createdAt, true);
+  });
+
+  test("resetBudgetForPrompt no-ops for unknown session", () => {
+    const m = new SessionStateManager(makeConfig({}));
+    assert.doesNotThrow(() => m.resetBudgetForPrompt("ghost"));
+    assert.equal(m.getSession("ghost"), undefined);
   });
 });
 
@@ -838,6 +903,62 @@ describe("plugin server hooks", () => {
     await callHook(hooks["tool.execute.before"], { sessionID: "ghost", tool: "bash" }, { args: {} });
     await callHook(hooks["tool.execute.after"], { sessionID: "ghost" }, { output: "x" });
     await callHook(hooks["tool.execute.before"], { sessionID: "ghost", tool: "bash" }, { args: {} });
+  });
+});
+
+describe("chat.message replenishOnPrompt", () => {
+  test("opted-in profile resets tool/token budget and recovers finalization", async () => {
+    const hooks = await server({} as unknown as PluginInput, makeConfig({
+      defaults: { maxTools: 99, maxTokens: 100000 },
+      agents: { replenisher: { enabled: true, maxTools: 2, replenishOnPrompt: true } },
+    }) as unknown as PluginOptions);
+    await callHook(hooks["chat.params"], { sessionID: "sR", agent: "replenisher" });
+    for (let i = 0; i < 2; i++) {
+      await callHook(hooks["tool.execute.before"], { sessionID: "sR", tool: "bash" }, { args: {} });
+      await callHook(hooks["tool.execute.after"], { sessionID: "sR" }, { output: "" });
+    }
+    await assert.rejects(
+      callHook(hooks["tool.execute.before"], { sessionID: "sR", tool: "bash" }, { args: {} }),
+      (err: unknown) => err instanceof CapacityLimitError && err.reason === "tool_limit",
+    );
+    await callHook(hooks["chat.message"], { sessionID: "sR" });
+    await callHook(hooks["tool.execute.before"], { sessionID: "sR", tool: "read" }, { args: {} });
+    const out: Record<string, unknown> = { output: "x".repeat(400) };
+    await callHook(hooks["tool.execute.after"], { sessionID: "sR" }, out);
+    assert.match(String(out.output), /stage: execution/);
+    assert.match(String(out.output), /tools: 1\/2/);
+  });
+
+  test("omitted replenishOnPrompt keeps counters cumulative", async () => {
+    const hooks = await server({} as unknown as PluginInput, makeConfig({
+      defaults: { maxTools: 99, maxTokens: 100000 },
+      agents: { cumulative: { enabled: true, maxTools: 1 } },
+    }) as unknown as PluginOptions);
+    await callHook(hooks["chat.params"], { sessionID: "sC", agent: "cumulative" });
+    await callHook(hooks["tool.execute.before"], { sessionID: "sC", tool: "bash" }, { args: {} });
+    await callHook(hooks["tool.execute.after"], { sessionID: "sC" }, { output: "" });
+    await callHook(hooks["chat.message"], { sessionID: "sC" });
+    await assert.rejects(
+      callHook(hooks["tool.execute.before"], { sessionID: "sC", tool: "bash" }, { args: {} }),
+      (err: unknown) => err instanceof CapacityLimitError && err.reason === "tool_limit",
+    );
+  });
+
+  test("disabled or unconfigured agents never reset and chat.message creates no state", async () => {
+    const hooks = await server({} as unknown as PluginInput, makeConfig({
+      defaults: { maxTools: 2, maxTokens: 50 },
+      agents: { "fixture-disabled": { enabled: false, replenishOnPrompt: true } },
+    }) as unknown as PluginOptions);
+    await callHook(hooks["chat.message"], { sessionID: "sD" });
+    for (let i = 0; i < 5; i++) {
+      await callHook(hooks["tool.execute.before"], { sessionID: "sD", tool: "bash" }, { args: {} });
+      await callHook(hooks["tool.execute.after"], { sessionID: "sD" }, { output: "x".repeat(5000) });
+    }
+    await callHook(hooks["chat.message"], { sessionID: "sU" });
+    for (let i = 0; i < 5; i++) {
+      await callHook(hooks["tool.execute.before"], { sessionID: "sU", tool: "bash" }, { args: {} });
+      await callHook(hooks["tool.execute.after"], { sessionID: "sU" }, { output: "x".repeat(5000) });
+    }
   });
 });
 

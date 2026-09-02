@@ -58,6 +58,16 @@ export const server: Plugin = async (
       stateManager.getOrCreateSession(input.sessionID, input.agent);
     },
 
+    "chat.message": async (input) => {
+      // Replenish opted-in guarded sessions only: the agent must be mapped,
+      // non-exempt, and explicitly configured with replenishOnPrompt. Never
+      // creates session state; resetBudgetForPrompt no-ops on unknown ids.
+      const agent = sessionAgent.get(input.sessionID);
+      if (!agent || stateManager.isAgentExempt(agent)) return;
+      if (!stateManager.resolveProfile(agent).replenishOnPrompt) return;
+      stateManager.resetBudgetForPrompt(input.sessionID);
+    },
+
     "tool.execute.before": async (input, output) => {
       if (typeof input.sessionID !== "string") return;
       const tool = String(input.tool ?? "");
